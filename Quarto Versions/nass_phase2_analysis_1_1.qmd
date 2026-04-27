@@ -107,7 +107,7 @@ hosp_files <- list(
   "2023" = file.path(d23,    "NASS_2023_Hospital.dta")
 )
 
-cpt_codes  <- c("64864","64865")
+cpt_codes  <- c("64864","64865","64885","64886")
 dx_stem    <- "S045"
 
 # Phase 2 inclusion logic — broader open wound matching
@@ -825,7 +825,7 @@ digraph flow {
   B [label="Group 1: Traumatic Facial Nerve Laceration\\nUnweighted N = ', format(g1_n, big.mark=","), '\\nWeighted national estimate = ', format(g1_w, big.mark=","), '\\n\\nInclusion criteria (either A or B):\\nA. S04.5 family code co-occurring with\\n    S01.* (head) or S11.* (neck) open wound\\n    OR external cause code (W25-W27, W45,\\n    X99, Y28, V01-V99)\\nB. CPT 64864 or 64865 co-occurring with\\n    S01.* or S11.* open wound code",
      fillcolor="#2E86C1", fontcolor=white, color="#2175A9"]
 
-  C [label="Group 2: Traumatic Facial Nerve Laceration WITH Repair\\nUnweighted N = ', format(g2_n, big.mark=","), '  |  Weighted N = ', format(g2_w, big.mark=","), '\\n\\nInclusion criteria:\\nAny encounter from Group 1\\nco-occurring with CPT for facial nerve suture\\n(CPT 64864 or CPT 64865)",
+  C [label="Group 2: Traumatic Facial Nerve Laceration WITH Repair\\nUnweighted N = ', format(g2_n, big.mark=","), '  |  Weighted N = ', format(g2_w, big.mark=","), '\\n\\nInclusion criteria:\\nAny encounter from Group 1\\nco-occurring with CPT for facial nerve suture\\n(CPT 64864, 64865, 64885, or 64886)",
      fillcolor="#EBF5FB", fontcolor="#1A5276", color="#2E86C1"]
 
   D [label="Group 3: Traumatic Facial Nerve Laceration WITHOUT Repair\\nUnweighted N = ', format(g3_n, big.mark=","), '  |  Weighted N = ', format(g3_w, big.mark=","), '\\n\\nInclusion criteria:\\nGroup 1 minus Group 2\\n(no qualifying CPT code for facial nerve suture present)",
@@ -1985,11 +1985,13 @@ if (!is.na(html_src)) {
 
 # QMD source: copy from the working directory if present
 qmd_src <- file.path(getwd(), qmd_basename)
-if (file.exists(qmd_src)) {
-  file.copy(qmd_src,
-            file.path(qmd_dir, qmd_basename),
-            overwrite=TRUE)
+qmd_dst <- file.path(qmd_dir, qmd_basename)
+if (file.exists(qmd_src) &&
+    normalizePath(qmd_src) != normalizePath(qmd_dst)) {
+  file.copy(qmd_src, qmd_dst, overwrite=TRUE)
   message("QMD copied from: ", qmd_src)
+} else {
+  message("QMD already in Quarto Versions — skipping copy.")
 }
 
 message("\nAll outputs saved under: ", output_dir)
