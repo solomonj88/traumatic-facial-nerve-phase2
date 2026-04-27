@@ -1,0 +1,4 @@
+*.dta
+*_cache/
+*_files/
+*_freeze/
