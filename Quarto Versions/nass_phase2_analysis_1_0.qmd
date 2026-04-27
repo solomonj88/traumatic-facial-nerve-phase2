@@ -1200,6 +1200,208 @@ sens2_tbl %>%
                 full_width=FALSE)
 ```
 
+## Sensitivity Analysis 3: Maximum specificity
+
+```{r sensitivity-3}
+#| cache: false
+
+# ── Sensitivity Analysis 3: Maximum specificity ───────────────────────────────
+# Definition: S04.51* or S04.52* (laterality specified, right or left)
+#             PLUS anatomically concordant facial nerve distribution wound codes
+#             PLUS external cause sharp object or transport mechanism code
+#
+# S04.51* = injury of facial nerve, right side
+# S04.52* = injury of facial nerve, left side
+# Anatomic wound codes: S01.1* (eyelid/periocular), S01.3* (ear),
+#                       S01.4* (cheek/TMJ), S01.5* (lip/oral cavity),
+#                       S01.81* (other part of face)
+# External cause: W25-W27 (sharp object), W45 (foreign body through skin),
+#                 X99 (assault with sharp object), Y28 (sharp object
+#                 undetermined intent), V01-V99 (transport accidents)
+
+dx_cols  <- grep("^i10_dx",   names(enc_all), value=TRUE, ignore.case=TRUE)
+cpt_cols <- grep("^cpt",      names(enc_all), value=TRUE, ignore.case=TRUE)
+ec_cols  <- grep("^i10_ecause|^e_cause|^externalcause",
+                 names(enc_all), value=TRUE, ignore.case=TRUE)
+
+# Laterality-specified facial nerve injury codes
+s3_nerve <- function(row) {
+  any(sapply(dx_cols, function(col) {
+    cd <- trimws(as.character(enc_all[[col]][row]))
+    str_starts(cd, "S0451") | str_starts(cd, "S0452")
+  }))
+}
+
+# Anatomically relevant facial wound codes
+s3_wound <- function(row) {
+  any(sapply(dx_cols, function(col) {
+    cd <- trimws(as.character(enc_all[[col]][row]))
+    str_starts(cd, "S011") |   # eyelid/periocular
+    str_starts(cd, "S013") |   # ear
+    str_starts(cd, "S014") |   # cheek/TMJ
+    str_starts(cd, "S015") |   # lip/oral cavity
+    str_starts(cd, "S0181")    # other part of face
+  }))
+}
+
+# External cause sharp object or transport codes
+s3_cause <- function(row) {
+  if (length(ec_cols) == 0) return(FALSE)
+  any(sapply(ec_cols, function(col) {
+    cd <- trimws(as.character(enc_all[[col]][row]))
+    str_starts(cd, "W25") | str_starts(cd, "W26") |
+    str_starts(cd, "W27") | str_starts(cd, "W45") |
+    str_starts(cd, "X99") | str_starts(cd, "Y28") |
+    str_starts(cd, "V")
+  }))
+}
+
+# Apply vectorized across all rows
+message("Running Sensitivity Analysis 3 extraction...")
+nerve_flag <- rowSums(sapply(dx_cols, function(col) {
+  cd <- trimws(as.character(enc_all[[col]]))
+  str_starts(cd, "S0451") | str_starts(cd, "S0452")
+})) > 0
+
+wound_flag <- rowSums(sapply(dx_cols, function(col) {
+  cd <- trimws(as.character(enc_all[[col]]))
+  str_starts(cd, "S011") | str_starts(cd, "S013") |
+  str_starts(cd, "S014") | str_starts(cd, "S015") |
+  str_starts(cd, "S0181")
+})) > 0
+
+if (length(ec_cols) > 0) {
+  cause_flag <- rowSums(sapply(ec_cols, function(col) {
+    cd <- trimws(as.character(enc_all[[col]]))
+    str_starts(cd, "W25") | str_starts(cd, "W26") |
+    str_starts(cd, "W27") | str_starts(cd, "W45") |
+    str_starts(cd, "X99") | str_starts(cd, "Y28") |
+    str_starts(cd, "V")
+  })) > 0
+} else {
+  message("No external cause columns found — cause_flag set to FALSE for all rows")
+  cause_flag <- rep(FALSE, nrow(enc_all))
+}
+
+# Group 1 SA3: laterality-specified nerve + anatomic wound + external cause
+sa3_g1 <- nerve_flag & wound_flag & cause_flag
+
+# Group 2 SA3: Group 1 plus CPT repair code
+cpt_flag_sa3 <- rowSums(sapply(cpt_cols, function(col) {
+  trimws(as.character(enc_all[[col]])) %in% c("64864","64865")
+})) > 0
+
+sa3_g2 <- sa3_g1 & cpt_flag_sa3
+sa3_g3 <- sa3_g1 & !cpt_flag_sa3
+
+# Compute weighted estimates
+sa3_data <- enc_all[sa3_g1, ]
+sa3_g1_uw <- sum(sa3_g1)
+sa3_g1_w  <- round(sum(enc_all$discwt[sa3_g1], na.rm=TRUE))
+sa3_g2_uw <- sum(sa3_g2)
+sa3_g2_w  <- round(sum(enc_all$discwt[sa3_g2], na.rm=TRUE))
+sa3_g3_uw <- sum(sa3_g3)
+sa3_g3_w  <- round(sum(enc_all$discwt[sa3_g3], na.rm=TRUE))
+sa3_rate  <- round(100 * sa3_g2_w / sa3_g1_w, 1)
+
+message("=== Sensitivity Analysis 3 Results ===")
+message("Group 1 unweighted: ", format(sa3_g1_uw, big.mark=","))
+message("Group 1 weighted:   ", format(sa3_g1_w,  big.mark=","))
+message("Group 2 unweighted: ", format(sa3_g2_uw, big.mark=","))
+message("Group 2 weighted:   ", format(sa3_g2_w,  big.mark=","))
+message("Group 3 unweighted: ", format(sa3_g3_uw, big.mark=","))
+message("Group 3 weighted:   ", format(sa3_g3_w,  big.mark=","))
+message("Repair rate:        ", sa3_rate, "%")
+
+# Build summary table
+sa3_summary <- tibble(
+  Definition = c(
+    "Laterality-specified nerve injury (S04.51/52*)",
+    "Plus anatomically concordant wound (S01.1/3/4/5/81*)",
+    "Plus external cause code (W25-27, W45, X99, Y28, V*)",
+    "Group 2: CPT 64864 or 64865 present"
+  ),
+  `Requirement` = c("Required","Required","Required","Required for Group 2")
+)
+
+sa3_results <- tibble(
+  Metric = c(
+    "Group 1 (all confirmed laceration) — unweighted N",
+    "Group 1 (all confirmed laceration) — weighted N",
+    "Group 2 (with repair) — unweighted N",
+    "Group 2 (with repair) — weighted N",
+    "Group 3 (without repair) — unweighted N",
+    "Group 3 (without repair) — weighted N",
+    "Overall repair rate (weighted)"
+  ),
+  Value = c(
+    format(sa3_g1_uw, big.mark=","),
+    format(sa3_g1_w,  big.mark=","),
+    format(sa3_g2_uw, big.mark=","),
+    format(sa3_g2_w,  big.mark=","),
+    format(sa3_g3_uw, big.mark=","),
+    format(sa3_g3_w,  big.mark=","),
+    paste0(sa3_rate, "%")
+  )
+)
+
+sa3_results %>%
+  kable(caption=paste0(
+    "Sensitivity Analysis 3: Maximum Specificity Definition. ",
+    "Requires laterality-specified facial nerve injury code (S04.51* or S04.52*) ",
+    "co-occurring with anatomically concordant facial wound code ",
+    "(S01.1*, S01.3*, S01.4*, S01.5*, or S01.81*) ",
+    "AND external cause sharp object or transport code. ",
+    "HCUP NASS 2016\u20132023. Weighted estimates use DISCWT.")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=FALSE)
+```
+
+Then add this to the `excel-output` chunk after the Sensitivity Analysis 2 sheet:
+
+```r
+# ── Sensitivity Analysis 3 Sheet ─────────────────────────────────────────────
+addWorksheet(wb, "Sensitivity Analysis 3")
+writeData(wb, "Sensitivity Analysis 3",
+          "Sensitivity Analysis 3: Maximum Specificity — Laterality + Anatomic Wound + External Cause",
+          startRow=1, startCol=1)
+addStyle(wb, "Sensitivity Analysis 3", title_s, rows=1, cols=1)
+mergeCells(wb, "Sensitivity Analysis 3", cols=1:2, rows=1)
+writeData(wb, "Sensitivity Analysis 3", sa3_results,
+          startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "Sensitivity Analysis 3", header_s, rows=3, cols=1:2,
+         gridExpand=TRUE)
+addStyle(wb, "Sensitivity Analysis 3", data_s,
+         rows=4:(nrow(sa3_results)+3), cols=1:2, gridExpand=TRUE)
+setColWidths(wb, "Sensitivity Analysis 3", cols=1, widths=45)
+setColWidths(wb, "Sensitivity Analysis 3", cols=2, widths=20)
+fn_sa3 <- nrow(sa3_results)+5
+writeData(wb, "Sensitivity Analysis 3",
+  paste0("Sensitivity Analysis 3 definition: S04.51* or S04.52* (laterality-specified ",
+         "facial nerve injury) co-occurring with S01.1*, S01.3*, S01.4*, S01.5*, or ",
+         "S01.81* (anatomically relevant facial wound) AND external cause code from ",
+         "W25\u2013W27, W45, X99, Y28, or V01\u2013V99 (sharp object or transport mechanism). ",
+         "This represents the maximum specificity definition feasible in ICD-10-CM ",
+         "administrative data for confirmed traumatic facial nerve laceration. ",
+         "Note: external cause code completeness varies by institution and year; ",
+         "cohort size reflects availability of all three code types simultaneously. ",
+         "HCUP NASS 2016\u20132023."),
+  startRow=fn_sa3, startCol=1)
+mergeCells(wb, "Sensitivity Analysis 3", cols=1:2, rows=fn_sa3)
+addStyle(wb, "Sensitivity Analysis 3", note_s, rows=fn_sa3, cols=1)
+setRowHeights(wb, "Sensitivity Analysis 3", rows=fn_sa3, heights=80)
+```
+
+**One critical practical note before running**
+
+The external cause code columns in NASS have variable names depending on the year — some years use `I10_ECAUSE1`, `I10_ECAUSE2` etc., others use different naming conventions. The code above searches for columns matching `i10_ecause`, `e_cause`, or `externalcause` patterns. Before running, check what external cause columns actually exist in your `enc_all` object by running this in the console:
+
+```r
+grep("cause|ecause|external", names(enc_all), 
+     value=TRUE, ignore.case=TRUE)
+```
+
+
 # Phase 1 vs Phase 2 Comparison (Internal Quality Check)
 
 ```{r phase1-vs-phase2}
@@ -1844,12 +2046,13 @@ if (!is.na(html_src)) {
 }
 
 # QMD source: copy from the working directory if present
-qmd_src <- file.path(getwd(), qmd_basename)
-if (file.exists(qmd_src)) {
-  file.copy(qmd_src,
-            file.path(qmd_dir, qmd_basename),
-            overwrite=TRUE)
-  message("QMD copied from: ", qmd_src)
+qmd_src <- file.path(getwd(), "nass_phase2_analysis_1_0.qmd")
+qmd_dst <- file.path(qmd_dir, "nass_phase2_analysis_1_0.qmd")
+if (file.exists(qmd_src) && normalizePath(qmd_src) != normalizePath(qmd_dst)) {
+  file.copy(qmd_src, qmd_dst, overwrite=TRUE)
+  message("QMD copied to Quarto Versions: ", qmd_dir)
+} else {
+  message("QMD is already in Quarto Versions — no copy needed.")
 }
 
 message("\nAll outputs saved under: ", output_dir)

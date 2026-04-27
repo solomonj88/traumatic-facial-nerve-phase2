@@ -1,0 +1,2006 @@
+---
+title: "Traumatic Facial Nerve Laceration: HCUP NASS 2016–2023 (Phase 2)"
+author: "Solomon Johnson"
+date: "`r Sys.Date()`"
+output-file: "nass_phase2_analysis_1_1.html"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: true
+  freeze: auto
+---
+
+<!--
+============================================================
+CHANGELOG
+v1.1 — 2026-04-27 — Add Sensitivity Analysis 3 (maximum specificity).
+       Adds laterality-specific nerve flags (S04.51*, S04.52*) and
+       anatomic wound flags (S01.1*, S01.3*, S01.4*, S01.5*, S01.81*)
+       to extraction. SA3 definition: laterality-specified nerve injury
+       + anatomically concordant wound + external cause code.
+       Cache must be cleared before re-rendering (extraction changed).
+v1.0 — 2026-04-27 — Initial Phase 2 analysis. New Group 1
+       definition (Criterion A: S04.5 + open wound or external
+       cause; Criterion B: CPT + open wound). Adds two
+       sensitivity analyses, Phase 1 vs Phase 2 comparison
+       sheet, and an automated draft methods paragraph.
+       Output redirected from Desktop to OneDrive Phase 2
+       folder with subfolder routing (Figures, Excel, Word
+       Tables, Quarto Versions).
+============================================================
+-->
+
+```{r setup}
+#| cache: false
+pkgs <- c("haven","dplyr","purrr","furrr","future","readr","tidyr",
+          "stringr","survey","openxlsx","ggplot2","scales","patchwork",
+          "ggrepel","DiagrammeR","DiagrammeRsvg","rsvg",
+          "WeightIt","cobalt","knitr","kableExtra","maps","mapproj",
+          "gt","officer","flextable")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+
+library(haven);     library(dplyr);     library(purrr);    library(furrr)
+library(future);    library(readr);     library(tidyr);    library(stringr)
+library(survey);    library(openxlsx);  library(ggplot2);  library(scales)
+library(patchwork); library(ggrepel);   library(WeightIt); library(cobalt)
+library(knitr);     library(kableExtra);library(maps);     library(mapproj)
+library(DiagrammeR);library(DiagrammeRsvg);library(rsvg)
+library(gt);
+
+# Phase 2 output directory — OneDrive only, no Desktop output
+output_dir <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Analysis/Phase 2"
+
+if (!dir.exists(path.expand(output_dir))) {
+  stop("Phase 2 output directory not found: ", output_dir)
+}
+
+fig_dir   <- file.path(path.expand(output_dir), "Figures")
+xlsx_dir  <- file.path(path.expand(output_dir), "Excel")
+word_dir  <- file.path(path.expand(output_dir), "Word Tables")
+qmd_dir   <- file.path(path.expand(output_dir), "Quarto Versions")
+
+for (d in c(fig_dir, xlsx_dir, word_dir, qmd_dir)) {
+  if (!dir.exists(d)) {
+    stop("Required Phase 2 subfolder not found: ", d)
+  }
+}
+
+message("Phase 2 output_dir confirmed: ", output_dir)
+```
+
+# Configuration
+
+```{r config}
+d16_23 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/NASS_HCUP Database/RAW Data Files HNASS"
+d21 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2021"
+d22 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2022"
+d23 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2023"
+
+enc_files <- list(
+  "2016" = file.path(d16_23, "NASS_2016_Encounter-002.dta"),
+  "2017" = file.path(d16_23, "NASS_2017_Encounter-003.dta"),
+  "2018" = file.path(d16_23, "NASS_2018_Encounter-001.dta"),
+  "2019" = file.path(d16_23, "NASS_2019_Encounter-005.dta"),
+  "2020" = file.path(d16_23, "NASS_2020_Encounter.dta"),
+  "2021" = file.path(d21,    "NASS_2021_Encounter.dta"),
+  "2022" = file.path(d22,    "NASS_2022_Encounter.dta"),
+  "2023" = file.path(d23,    "NASS_2023_Encounter.dta")
+)
+
+hosp_files <- list(
+  "2016" = file.path(d16_23, "NASS_2016_Hospital.dta"),
+  "2017" = file.path(d16_23, "NASS_2017_Hospital.dta"),
+  "2018" = file.path(d16_23, "NASS_2018_Hospital.dta"),
+  "2019" = file.path(d16_23, "NASS_2019_Hospital.dta"),
+  "2020" = file.path(d16_23, "NASS_2020_Hospital.dta"),
+  "2021" = file.path(d21,    "NASS_2021_Hospital.dta"),
+  "2022" = file.path(d22,    "NASS_2022_Hospital.dta"),
+  "2023" = file.path(d23,    "NASS_2023_Hospital.dta")
+)
+
+cpt_codes  <- c("64864","64865")
+dx_stem    <- "S045"
+
+# Phase 2 inclusion logic — broader open wound matching
+s01_stem   <- "S01"   # open wound of head, any subcode
+s11_stem   <- "S11"   # open wound of neck, any subcode
+
+# External cause codes: W25-W27, W45, X99, Y28, V01-V99
+# Matched against the leading 3 characters of any dx code.
+ext_cause_pattern <- "^(W2[5-7]|W45|X99|Y28|V(0[1-9]|[1-9][0-9]))"
+
+age_breaks <- c(18, 35, 45, 55, 65, Inf)
+age_labels <- c("18-34","35-44","45-54","55-65","65+")
+
+assign_age_group <- function(x) {
+  cut(as.numeric(x), breaks=age_breaks, labels=age_labels,
+      right=FALSE, include.lowest=TRUE)
+}
+
+# HCUP NASS variable coding (verified per official NASS Notes documentation)
+# HOSP_LOCATION:  0=Rural, 1=Urban
+# HOSP_TEACH:     0=Nonteaching, 1=Teaching
+# HOSP_LOCTEACH:  1=Rural nonteaching, 2=Urban nonteaching, 3=Urban teaching
+# HOSP_REGION:    1=Northeast, 2=Midwest, 3=South, 4=West
+# FEMALE:         0=Male, 1=Female
+# PAY1:           1=Medicare,2=Medicaid,3=Private,4=Self-pay,5=No charge,6=Other
+# RACE:           1=White,2=Black,3=Hispanic,4=Asian/PI,5=Native American,6=Other
+# ZIPINC_QRTL:    1=0-25th,2=26-50th,3=51-75th,4=76-100th
+```
+
+# Data Extraction
+
+```{r extract-function}
+extract_year <- function(year, enc_fp, hosp_fp) {
+  message("  Loading: ", year)
+  if (!file.exists(enc_fp))  { warning("Missing: ", enc_fp);  return(NULL) }
+  if (!file.exists(hosp_fp)) { warning("Missing: ", hosp_fp); return(NULL) }
+
+  enc  <- read_dta(enc_fp)
+  hosp <- read_dta(hosp_fp)
+  ec   <- names(enc); hc <- names(hosp)
+
+  get_col <- function(pat, cols) grep(pat, cols, value=TRUE, ignore.case=TRUE)[1]
+
+  dx_cols  <- grep("^i10_dx",   ec, value=TRUE, ignore.case=TRUE)
+  cpt_cols <- grep("^cpt[0-9]", ec, value=TRUE, ignore.case=TRUE)
+
+  age_col    <- get_col("^age$",          ec)
+  female_col <- get_col("^female$",       ec)
+  race_col   <- get_col("^race$",         ec)
+  pay1_col   <- get_col("^pay1$",         ec)
+  zip_col    <- get_col("^zipinc_qrtl$",  ec)
+  totchg_col <- get_col("^totchg",        ec)
+  discwt_col <- get_col("^discwt$",       ec)
+  hosp_id_e  <- get_col("^hosp_nass$",    ec)
+  hosp_id_h  <- get_col("^hosp_nass$",    hc)
+  region_col <- get_col("^hosp_region$",  hc)
+  loc_col    <- get_col("^hosp_location$",hc)
+  teach_col  <- get_col("^hosp_teach$|^hosp_locteach$", hc)
+
+  # Phase 2 flag construction
+  dx_s045 <- rowSums(sapply(dx_cols, function(col)
+    str_starts(trimws(as.character(enc[[col]])), dx_stem))) > 0
+  s01_flag <- rowSums(sapply(dx_cols, function(col)
+    str_starts(trimws(as.character(enc[[col]])), s01_stem))) > 0
+  s11_flag <- rowSums(sapply(dx_cols, function(col)
+    str_starts(trimws(as.character(enc[[col]])), s11_stem))) > 0
+  ext_cause_flag <- rowSums(sapply(dx_cols, function(col)
+    str_detect(trimws(as.character(enc[[col]])), ext_cause_pattern))) > 0
+  cpt_flag <- rowSums(sapply(cpt_cols, function(col)
+    trimws(as.character(enc[[col]])) %in% cpt_codes)) > 0
+
+  # Phase 2 Group 1 = Criterion A OR Criterion B
+  #   Criterion A: S04.5 co-occurring with S01.* OR S11.* OR external cause
+  #   Criterion B: CPT 64864/64865 co-occurring with S01.* OR S11.*
+  crit_a <- dx_s045 & (s01_flag | s11_flag | ext_cause_flag)
+  crit_b <- cpt_flag & (s01_flag | s11_flag)
+  g1     <- crit_a | crit_b
+  g2     <- cpt_flag & g1
+  keep   <- g1
+  if (sum(keep) == 0) return(NULL)
+
+  cpt_assigned <- rep(NA_character_, nrow(enc))
+  for (code in cpt_codes) {
+    hit <- rowSums(sapply(cpt_cols, function(col)
+      trimws(as.character(enc[[col]])) == code)) > 0
+    cpt_assigned[hit & is.na(cpt_assigned)] <- code
+  }
+
+  out <- tibble(
+    year       = year,
+    had_repair = as.integer(g2[keep]),
+    cpt_code   = cpt_assigned[keep],
+    discwt     = if (!is.na(discwt_col))
+                   as.numeric(enc[[discwt_col]][keep]) else rep(1, sum(keep)),
+    hosp_id    = if (!is.na(hosp_id_e))
+                   as.character(enc[[hosp_id_e]][keep])
+                 else as.character(seq_len(sum(keep))),
+    totchg     = if (!is.na(totchg_col))
+                   as.numeric(enc[[totchg_col]][keep]) else NA_real_,
+    # Phase 2 — preserve per-row flags so sensitivity analyses can subset
+    # enc_all directly without a re-extraction pass
+    flag_s045      = dx_s045[keep],
+    flag_s01       = s01_flag[keep],
+    flag_s11       = s11_flag[keep],
+    flag_extcause  = ext_cause_flag[keep],
+    flag_cpt       = cpt_flag[keep],
+    flag_crit_a    = crit_a[keep],
+    flag_crit_b    = crit_b[keep],
+    # Sensitivity Analysis 3 flags — laterality-specific nerve and anatomic wound
+    flag_sa3_nerve = (rowSums(sapply(dx_cols, function(col)
+      str_starts(trimws(as.character(enc[[col]])), "S0451") |
+      str_starts(trimws(as.character(enc[[col]])), "S0452"))) > 0)[keep],
+    flag_sa3_wound = (rowSums(sapply(dx_cols, function(col) {
+      cd <- trimws(as.character(enc[[col]]))
+      str_starts(cd, "S011") | str_starts(cd, "S013") |
+      str_starts(cd, "S014") | str_starts(cd, "S015") |
+      str_starts(cd, "S0181")
+    })) > 0)[keep]
+  )
+
+  out$age_group <- if (!is.na(age_col))
+    as.character(assign_age_group(enc[[age_col]][keep]))
+  else NA_character_
+
+  if (!is.na(female_col)) {
+    f <- as.numeric(enc[[female_col]][keep])
+    out$sex <- case_when(f==1~"Female", f==0~"Male", TRUE~NA_character_)
+  } else out$sex <- NA_character_
+
+  if (!is.na(race_col)) {
+    r <- as.character(as.numeric(enc[[race_col]][keep]))
+    out$race <- case_when(
+      r=="1" ~ "White", r=="2" ~ "Black", r=="3" ~ "Hispanic",
+      r %in% c("4","5","6","7") ~
+        "Asian or Pacific Islander or Native American or Other",
+      TRUE ~ NA_character_)
+  } else out$race <- NA_character_
+
+  if (!is.na(pay1_col)) {
+    p <- as.character(as.numeric(enc[[pay1_col]][keep]))
+    out$insurance <- case_when(
+      p=="1"~"Medicare", p=="2"~"Medicaid", p=="3"~"Private insurance",
+      p=="4"~"Self-pay", p %in% c("5","6")~"Other", TRUE~NA_character_)
+  } else out$insurance <- NA_character_
+
+  if (!is.na(zip_col)) {
+    z <- as.character(as.numeric(enc[[zip_col]][keep]))
+    out$income_qrtl <- case_when(
+      z=="1"~"0-25th", z=="2"~"26th to 50th",
+      z=="3"~"51st to 75th", z=="4"~"76th to 100th", TRUE~NA_character_)
+  } else out$income_qrtl <- NA_character_
+
+  if (!is.na(hosp_id_h)) {
+    hosp_slim <- hosp %>%
+      mutate(hosp_id = as.character(.data[[hosp_id_h]]))
+
+    hosp_slim$hosp_region <- if (!is.na(region_col))
+      case_when(as.numeric(hosp[[region_col]])==1~"Northeast",
+                as.numeric(hosp[[region_col]])==2~"Midwest",
+                as.numeric(hosp[[region_col]])==3~"South",
+                as.numeric(hosp[[region_col]])==4~"West",
+                TRUE~NA_character_)
+    else NA_character_
+
+    hosp_slim$hosp_location <- if (!is.na(loc_col))
+      case_when(as.numeric(hosp[[loc_col]])==0~"Rural",
+                as.numeric(hosp[[loc_col]])==1~"Urban",
+                TRUE~NA_character_)
+    else NA_character_
+
+    if (!is.na(teach_col)) {
+      t_raw <- as.numeric(hosp[[teach_col]])
+      hosp_slim$hosp_teach <- if (grepl("locteach", tolower(teach_col)))
+        case_when(t_raw==3~"Teaching", t_raw %in% c(1,2)~"Nonteaching",
+                  TRUE~NA_character_)
+      else
+        case_when(t_raw==1~"Teaching", t_raw==0~"Nonteaching",
+                  TRUE~NA_character_)
+    } else hosp_slim$hosp_teach <- NA_character_
+
+    out <- left_join(out,
+                     hosp_slim %>% select(hosp_id, hosp_region,
+                                          hosp_location, hosp_teach),
+                     by="hosp_id")
+  } else {
+    out$hosp_region   <- NA_character_
+    out$hosp_location <- NA_character_
+    out$hosp_teach    <- NA_character_
+  }
+  out
+}
+```
+
+```{r run-extraction}
+#| cache: true
+message("Starting parallel extraction 2016-2023 (Phase 2 criteria)...")
+plan(multisession, workers = max(1, availableCores()-1))
+enc_all <- bind_rows(Filter(Negate(is.null),
+  future_map2(names(enc_files), enc_files,
+    ~ extract_year(.x, .y, hosp_files[[.x]]),
+    .options = furrr_options(seed=TRUE))))
+plan(sequential)
+
+enc_all <- enc_all %>%
+  mutate(discwt = as.numeric(discwt), had_repair = as.integer(had_repair))
+
+message("Group 1 (unweighted): ", format(nrow(enc_all), big.mark=","))
+message("Group 2 repair:       ", format(sum(enc_all$had_repair), big.mark=","))
+```
+
+# Survey Design
+
+```{r survey-design}
+svy <- svydesign(ids=~hosp_id, weights=~discwt, data=enc_all, nest=TRUE)
+
+total_repair_w   <- sum(enc_all$discwt[enc_all$had_repair==1], na.rm=TRUE)
+total_norepair_w <- sum(enc_all$discwt[enc_all$had_repair==0], na.rm=TRUE)
+total_g1_w       <- sum(enc_all$discwt, na.rm=TRUE)
+
+message("Weighted Group 1: ", format(round(total_g1_w),       big.mark=","))
+message("Weighted Group 2: ", format(round(total_repair_w),   big.mark=","))
+message("Weighted Group 3: ", format(round(total_norepair_w), big.mark=","))
+```
+
+# Helper Functions
+
+```{r helpers}
+fmt_p <- function(p) {
+  sapply(p, function(x) {
+    if (is.na(x)) return(NA_character_)
+    if (x < 0.001) return("<0.001")
+    sprintf("%.3f", round(x, 3))
+  })
+}
+
+wt_cell <- function(var, level, repair_val) {
+  idx   <- enc_all$had_repair==repair_val &
+           !is.na(enc_all[[var]]) & enc_all[[var]]==level
+  n_w   <- sum(enc_all$discwt[idx], na.rm=TRUE)
+  denom <- if (repair_val==1) total_repair_w else total_norepair_w
+  paste0(format(round(n_w), big.mark=","),
+         " (", round(100*n_w/denom, 1), "%)")
+}
+
+wt_cell_g1 <- function(var, level) {
+  idx <- !is.na(enc_all[[var]]) & enc_all[[var]]==level
+  n_w <- sum(enc_all$discwt[idx], na.rm=TRUE)
+  paste0(format(round(n_w), big.mark=","),
+         " (", round(100*n_w/total_g1_w, 1), "%)")
+}
+
+repair_rate <- function(var, level) {
+  idx_g1     <- !is.na(enc_all[[var]]) & enc_all[[var]]==level
+  idx_repair <- idx_g1 & enc_all$had_repair==1
+  n_g1  <- sum(enc_all$discwt[idx_g1],    na.rm=TRUE)
+  n_rep <- sum(enc_all$discwt[idx_repair], na.rm=TRUE)
+  if (n_g1 == 0) return(NA_character_)
+  paste0(round(100*n_rep/n_g1, 1), "%")
+}
+
+svy_chisq_p <- function(var) {
+  d <- enc_all %>%
+    filter(!is.na(.data[[var]]),
+           !.data[[var]] %in% c("Unknown","Missing/Unknown"))
+  if (length(unique(d[[var]])) < 2) return(NA_real_)
+  s <- svydesign(ids=~hosp_id, weights=~discwt, data=d, nest=TRUE)
+  r <- tryCatch(
+    svychisq(as.formula(paste0("~had_repair+",var)), design=s, statistic="Chisq"),
+    error=function(e) NULL)
+  if (is.null(r)) return(NA_real_)
+  r$p.value
+}
+
+# Survey-weighted ANOVA on log-charges within a repair group
+# Uses grp column to avoid .data[[]] formula issues in svyglm
+svy_anova_charges_p <- function(repair_val, group_var) {
+  d <- enc_all %>%
+    filter(had_repair==repair_val, !is.na(totchg), totchg>0,
+           !is.na(.data[[group_var]]),
+           !.data[[group_var]] %in% c("Unknown","Missing/Unknown")) %>%
+    mutate(grp = factor(.data[[group_var]]))
+  if (length(unique(d$grp)) < 2 || nrow(d) < 10) return(NA_real_)
+  s   <- svydesign(ids=~hosp_id, weights=~discwt, data=d, nest=TRUE)
+  fit <- tryCatch(svyglm(log(totchg) ~ grp, design=s, family=gaussian()),
+                  error=function(e) NULL)
+  if (is.null(fit)) return(NA_real_)
+  an  <- tryCatch(regTermTest(fit, "grp"), error=function(e) NULL)
+  if (is.null(an)) return(NA_real_)
+  an$p
+}
+
+# Survey-weighted t-test on log-charges between two levels
+svy_ttest_charges_p <- function(repair_val, group_var) {
+  d <- enc_all %>%
+    filter(had_repair==repair_val, !is.na(totchg), totchg>0,
+           !is.na(.data[[group_var]]),
+           !.data[[group_var]] %in% c("Unknown","Missing/Unknown")) %>%
+    mutate(grp = factor(.data[[group_var]]))
+  if (length(unique(d$grp)) != 2 || nrow(d) < 10) return(NA_real_)
+  s   <- svydesign(ids=~hosp_id, weights=~discwt, data=d, nest=TRUE)
+  fit <- tryCatch(svyglm(log(totchg) ~ grp, design=s, family=gaussian()),
+                  error=function(e) NULL)
+  if (is.null(fit)) return(NA_real_)
+  coefs <- summary(fit)$coefficients
+  if (nrow(coefs) < 2) return(NA_real_)
+  coefs[2, "Pr(>|t|)"]
+}
+
+wt_median_iqr <- function(data, repair_val) {
+  d <- data %>% filter(had_repair==repair_val)
+  if (nrow(d)==0) return(NA_character_)
+  s <- svydesign(ids=~hosp_id, weights=~discwt, data=d, nest=TRUE)
+  q <- tryCatch(
+    svyquantile(~totchg, s, quantiles=c(0.25,0.5,0.75), na.rm=TRUE),
+    error=function(e) NULL)
+  if (is.null(q)) return(NA_character_)
+  v <- as.numeric(q$totchg)
+  paste0("$",format(round(v[2]),big.mark=","),
+         " ($",format(round(v[1]),big.mark=","),
+         "\u2013$",format(round(v[3]),big.mark=","),")")
+}
+
+# Weighted mean ± SD using age group midpoints
+mean_sd_cell <- function(repair_val) {
+  d   <- enc_all[which(enc_all$had_repair==as.integer(repair_val) &
+                       !is.na(enc_all$age_group)), ]
+  mid <- c("18-34"=26, "35-44"=39.5, "45-54"=49.5, "55-65"=60, "65+"=72)
+  ages <- mid[d$age_group]
+  wts  <- d$discwt
+  m    <- weighted.mean(ages, wts, na.rm=TRUE)
+  v    <- sum(wts*(ages-m)^2, na.rm=TRUE)/sum(wts, na.rm=TRUE)
+  paste0(round(m,1)," \u00b1 ",round(sqrt(v),1))
+}
+
+mean_sd_cell_g1 <- function() {
+  d   <- enc_all[which(!is.na(enc_all$age_group)), ]
+  mid <- c("18-34"=26, "35-44"=39.5, "45-54"=49.5, "55-65"=60, "65+"=72)
+  ages <- mid[d$age_group]
+  wts  <- d$discwt
+  m    <- weighted.mean(ages, wts, na.rm=TRUE)
+  v    <- sum(wts*(ages-m)^2, na.rm=TRUE)/sum(wts, na.rm=TRUE)
+  paste0(round(m,1)," \u00b1 ",round(sqrt(v),1))
+}
+
+make_rows <- function(var, levels_ordered, label) {
+  hdr <- tibble(
+    Characteristic    = label,
+    `No Repair (n, %)` = NA_character_,
+    `Repair (n, %)`    = NA_character_,
+    `Total (n)`        = NA_character_,
+    `Repair Rate (%)`  = NA_character_
+  )
+  sub <- map_dfr(levels_ordered, function(lev) {
+    tibble(
+      Characteristic     = paste0("   ", lev),
+      `No Repair (n, %)` = wt_cell(var, lev, 0),
+      `Repair (n, %)`    = wt_cell(var, lev, 1),
+      `Total (n)`        = wt_cell_g1(var, lev),
+      `Repair Rate (%)`  = repair_rate(var, lev)
+    )
+  })
+  bind_rows(hdr, sub)
+}
+```
+
+# Sheet 1 — National Estimates Table
+
+```{r sheet1}
+#| cache: false
+total_rate <- paste0(round(100*total_repair_w/total_g1_w, 1), "%")
+
+year_rows <- bind_rows(
+  tibble(
+    Characteristic     = "Total cases",
+    `No Repair (n, %)` = paste0(format(round(total_norepair_w),big.mark=",")," (100%)"),
+    `Repair (n, %)`    = paste0(format(round(total_repair_w),  big.mark=",")," (100%)"),
+    `Total (n)`        = format(round(total_g1_w), big.mark=","),
+    `Repair Rate (%)`  = total_rate
+  ),
+  map_dfr(as.character(2016:2023), function(yr) {
+    idx_yr  <- enc_all$year==yr
+    idx_rep <- idx_yr & enc_all$had_repair==1
+    n_yr    <- sum(enc_all$discwt[idx_yr],  na.rm=TRUE)
+    n_rep   <- sum(enc_all$discwt[idx_rep], na.rm=TRUE)
+    tibble(
+      Characteristic     = paste0("   ", yr),
+      `No Repair (n, %)` = wt_cell("year", yr, 0),
+      `Repair (n, %)`    = wt_cell("year", yr, 1),
+      `Total (n)`        = format(round(n_yr), big.mark=","),
+      `Repair Rate (%)`  = paste0(round(100*n_rep/n_yr, 1), "%")
+    )
+  })
+)
+
+sheet1 <- bind_rows(
+  year_rows,
+  tibble(
+    Characteristic     = "Age, mean \u00b1 SD",
+    `No Repair (n, %)` = mean_sd_cell(0),
+    `Repair (n, %)`    = mean_sd_cell(1),
+    `Total (n)`        = mean_sd_cell_g1(),
+    `Repair Rate (%)`  = NA_character_
+  ),
+  make_rows("sex",         c("Male","Female"),                "Sex"),
+  make_rows("age_group",   age_labels,                        "Age group"),
+  make_rows("race",
+    c("White","Black","Hispanic",
+      "Asian or Pacific Islander or Native American or Other"), "Race"),
+  make_rows("income_qrtl",
+    c("0-25th","26th to 50th","51st to 75th","76th to 100th"),
+    "Median household income of patients zipcode by quartile"),
+  make_rows("insurance",
+    c("Medicare","Medicaid","Private insurance","Self-pay","Other"),
+    "Insurance type"),
+  make_rows("hosp_region", c("Northeast","Midwest","South","West"),
+            "Hospital region"),
+  make_rows("hosp_location",c("Rural","Urban"),               "Hospital location"),
+  make_rows("hosp_teach",  c("Nonteaching","Teaching"),       "Hospital teach")
+)
+
+sheet1 %>%
+  kable(caption=paste0(
+    "National Estimates of Patient and Hospital Characteristics by ",
+    "Facial Nerve Repair Status, Including Repair Rates. ",
+    "HCUP NASS 2016\u20132023. Weighted national estimates (DISCWT). ",
+    "Total = All patients with traumatic facial nerve laceration nationally.")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=TRUE) %>%
+  row_spec(which(is.na(sheet1$`No Repair (n, %)`)), bold=TRUE)
+```
+
+# Sheet 2 — Multivariable Logistic Regression
+
+```{r sheet2}
+#| cache: true
+reg_data <- enc_all %>%
+  filter(!is.na(sex), !is.na(age_group), !is.na(race),
+         !is.na(income_qrtl), !is.na(insurance),
+         !is.na(hosp_region), !is.na(hosp_location), !is.na(hosp_teach)) %>%
+  mutate(
+    had_repair    = as.integer(had_repair),
+    discwt        = as.numeric(discwt),
+    sex           = relevel(factor(sex),           ref="Male"),
+    age_group     = relevel(factor(age_group, levels=age_labels), ref="18-34"),
+    race          = relevel(factor(race),           ref="White"),
+    income_qrtl   = relevel(factor(income_qrtl,
+                      levels=c("0-25th","26th to 50th",
+                               "51st to 75th","76th to 100th")),
+                      ref="76th to 100th"),
+    insurance     = relevel(factor(insurance),      ref="Private insurance"),
+    hosp_region   = relevel(factor(hosp_region),   ref="South"),
+    hosp_location = relevel(factor(hosp_location), ref="Urban"),
+    hosp_teach    = relevel(factor(hosp_teach),     ref="Nonteaching")
+  )
+
+svy_reg <- svydesign(ids=~hosp_id, weights=~discwt, data=reg_data, nest=TRUE)
+
+model <- svyglm(
+  had_repair ~ sex + age_group + race + income_qrtl + insurance +
+               hosp_region + hosp_location + hosp_teach,
+  design=svy_reg, family=quasibinomial(link="logit")
+)
+
+coef_df      <- as.data.frame(summary(model)$coefficients)
+coef_df$term <- rownames(coef_df)
+
+or_df <- coef_df %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    OR    = exp(Estimate),
+    lower = exp(Estimate - 1.96 * `Std. Error`),
+    upper = exp(Estimate + 1.96 * `Std. Error`),
+    OR_CI = paste0(sprintf("%.2f",OR)," (",
+                   sprintf("%.2f",lower),"\u2013",
+                   sprintf("%.2f",upper),")"),
+    p_fmt = fmt_p(`Pr(>|t|)`)
+  )
+
+term_map <- c(
+  "sexFemale"="Female",
+  "age_group35-44"="35-44","age_group45-54"="45-54",
+  "age_group55-65"="55-65","age_group65+"="65+",
+  "raceBlack"="Black","raceHispanic"="Hispanic",
+  "raceAsian or Pacific Islander or Native American or Other"=
+    "Asian or Pacific Islander or Native American or Other",
+  "income_qrtl0-25th"="0-25th",
+  "income_qrtl26th to 50th"="26th to 50th",
+  "income_qrtl51st to 75th"="51st to 75th",
+  "insuranceMedicare"="Medicare","insuranceMedicaid"="Medicaid",
+  "insuranceSelf-pay"="Self-pay","insuranceOther"="Other",
+  "hosp_regionNortheast"="Northeast","hosp_regionMidwest"="Midwest",
+  "hosp_regionWest"="West",
+  "hosp_locationRural"="Rural",
+  "hosp_teachTeaching"="Teaching"
+)
+
+build_or_group <- function(label, levels_ord, ref) {
+  hdr  <- tibble(Characteristic=label,
+                 `Adjusted OR (95% CI)`=NA_character_,
+                 `p value`=NA_character_)
+  rows <- map_dfr(levels_ord, function(lev) {
+    if (lev==ref) {
+      tibble(Characteristic=paste0("   ",lev),
+             `Adjusted OR (95% CI)`="Reference", `p value`=NA_character_)
+    } else {
+      key <- names(term_map)[term_map==lev]
+      r   <- or_df %>% filter(term %in% key)
+      tibble(Characteristic=paste0("   ",lev),
+             `Adjusted OR (95% CI)`=if(nrow(r)>0) r$OR_CI[1] else NA_character_,
+             `p value`=if(nrow(r)>0) r$p_fmt[1] else NA_character_)
+    }
+  })
+  bind_rows(hdr, rows)
+}
+
+sheet2 <- bind_rows(
+  build_or_group("Sex",         c("Male","Female"),              "Male"),
+  build_or_group("Age group",   age_labels,                      "18-34"),
+  build_or_group("Race",
+    c("White","Black","Hispanic",
+      "Asian or Pacific Islander or Native American or Other"),  "White"),
+  build_or_group("Median household income of patients zipcode by quartile",
+    c("0-25th","26th to 50th","51st to 75th","76th to 100th"), "76th to 100th"),
+  build_or_group("Insurance type",
+    c("Medicare","Medicaid","Private insurance","Self-pay","Other"),
+    "Private insurance"),
+  build_or_group("Hospital region",
+    c("Northeast","Midwest","South","West"),                     "South"),
+  build_or_group("Hospital location", c("Rural","Urban"),        "Urban"),
+  build_or_group("Hospital teach",    c("Nonteaching","Teaching"),"Nonteaching")
+)
+
+# Build the dynamic "significant predictors" string for footnotes
+sig_predictors <- or_df %>%
+  filter(`Pr(>|t|)` < 0.05, term %in% names(term_map)) %>%
+  mutate(label = term_map[term]) %>%
+  pull(label)
+sig_pred_text <- if (length(sig_predictors) > 0) {
+  paste(sig_predictors, collapse=", ")
+} else {
+  "none at p<0.05"
+}
+
+sheet2 %>%
+  kable(caption="Multivariable Logistic Regression for Odds of Facial Nerve Repair.") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=TRUE) %>%
+  row_spec(which(is.na(sheet2$`Adjusted OR (95% CI)`) |
+                   sheet2$`Adjusted OR (95% CI)`==""), bold=TRUE)
+```
+
+# Sheet 4 — Repair Rates by Year
+
+```{r sheet4}
+#| cache: false
+sheet4 <- enc_all %>%
+  group_by(year) %>%
+  summarise(
+    `Traumatic facial nerve injury (unweighted N)` = n(),
+    `Traumatic facial nerve injury (weighted N)`   = round(sum(discwt, na.rm=TRUE)),
+    `Repair (unweighted N)`      = sum(had_repair),
+    `Repair (weighted N)`        = round(sum(discwt[had_repair==1], na.rm=TRUE)),
+    `Repair rate — weighted (%)` = round(
+      100*sum(discwt[had_repair==1],na.rm=TRUE)/sum(discwt,na.rm=TRUE),1),
+    .groups="drop"
+  ) %>% rename(Year=year)
+
+sheet4 %>%
+  kable(caption="Repair Rates by Year. HCUP NASS 2016-2023.",
+        format.args=list(big.mark=",")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=FALSE)
+
+# Survey-weighted chi-square test for repair rate difference across years
+year_chisq <- svychisq(~had_repair + year,
+                        design = svy,
+                        statistic = "Chisq")
+year_p <- fmt_p(year_chisq$p.value)
+
+message("Chi-square test for repair rate across years: p = ", year_p)
+```
+
+# Sheet 5 — Charges Analysis
+
+```{r sheet5}
+#| cache: false
+charges_data <- enc_all %>% filter(!is.na(totchg), totchg > 0)
+
+overall_row <- tibble(
+  Characteristic                                 = "Total charges of encounter",
+  `No Repair Median (IQR)`                       = wt_median_iqr(charges_data, 0),
+  `Repair Median (IQR)`                          = wt_median_iqr(charges_data, 1),
+  `p value (no repair: within-group comparison)` = NA_character_,
+  `p value (repair: within-group comparison)`    = NA_character_
+)
+
+ins_levels      <- c("Medicare","Medicaid","Private insurance","Self-pay","Other")
+ins_anova_norep <- fmt_p(svy_anova_charges_p(0, "insurance"))
+ins_anova_rep   <- fmt_p(svy_anova_charges_p(1, "insurance"))
+
+ins_hdr <- tibble(
+  Characteristic                                 = "Insurance type",
+  `No Repair Median (IQR)`                       = NA_character_,
+  `Repair Median (IQR)`                          = NA_character_,
+  `p value (no repair: within-group comparison)` = ins_anova_norep,
+  `p value (repair: within-group comparison)`    = ins_anova_rep
+)
+
+ins_rows <- map_dfr(ins_levels, function(lev) {
+  d <- charges_data %>% filter(!is.na(insurance), insurance==lev)
+  tibble(
+    Characteristic                                 = paste0("   ", lev),
+    `No Repair Median (IQR)`                       = wt_median_iqr(d, 0),
+    `Repair Median (IQR)`                          = wt_median_iqr(d, 1),
+    `p value (no repair: within-group comparison)` = NA_character_,
+    `p value (repair: within-group comparison)`    = NA_character_
+  )
+})
+
+teach_ttest_norep <- fmt_p(svy_ttest_charges_p(0, "hosp_teach"))
+teach_ttest_rep   <- fmt_p(svy_ttest_charges_p(1, "hosp_teach"))
+
+teach_hdr <- tibble(
+  Characteristic                                 = "Hospital teaching status",
+  `No Repair Median (IQR)`                       = NA_character_,
+  `Repair Median (IQR)`                          = NA_character_,
+  `p value (no repair: within-group comparison)` = teach_ttest_norep,
+  `p value (repair: within-group comparison)`    = teach_ttest_rep
+)
+
+teach_rows <- map_dfr(c("Nonteaching","Teaching"), function(lev) {
+  d <- charges_data %>% filter(!is.na(hosp_teach), hosp_teach==lev)
+  tibble(
+    Characteristic                                 = paste0("   ", lev),
+    `No Repair Median (IQR)`                       = wt_median_iqr(d, 0),
+    `Repair Median (IQR)`                          = wt_median_iqr(d, 1),
+    `p value (no repair: within-group comparison)` = NA_character_,
+    `p value (repair: within-group comparison)`    = NA_character_
+  )
+})
+
+sheet5 <- bind_rows(overall_row, ins_hdr, ins_rows, teach_hdr, teach_rows)
+
+sheet5 %>%
+  kable(caption=paste0(
+    "Charge Analysis: Repair vs No Repair. Median (IQR) weighted national estimates. ",
+    "Insurance type p-values: survey-weighted ANOVA on log-charges within each group. ",
+    "Teaching status p-values: survey-weighted t-test on log-charges within each group.")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE) %>%
+  row_spec(which(is.na(sheet5$`No Repair Median (IQR)`)), bold=TRUE)
+```
+
+# NIS 2023 — Facial Nerve Repair (Inpatient)
+
+```{r nis-data}
+#| cache: false
+nis_sheet <- tibble(
+  `ICD-10-PCS Code` = c(
+    "00QM0ZZ",
+    "00QM3ZZ",
+    "00QM4ZZ",
+    "01QM0ZZ",
+    "01QM3ZZ",
+    "01QM4ZZ",
+    "TOTAL (PNS codes)"
+  ),
+  Description = c(
+    "Repair Facial Nerve, Open Approach (CNS section \u2014 incorrect)",
+    "Repair Facial Nerve, Percutaneous Approach (CNS section \u2014 incorrect)",
+    "Repair Facial Nerve, Percutaneous Endoscopic Approach (CNS section \u2014 incorrect)",
+    "Repair Facial Nerve, Open Approach (PNS section \u2014 correct)",
+    "Repair Facial Nerve, Percutaneous Approach (PNS section \u2014 correct)",
+    "Repair Facial Nerve, Percutaneous Endoscopic Approach (PNS section \u2014 correct)",
+    "All three PNS facial nerve repair codes combined"
+  ),
+  `Unweighted N` = c(0L, 0L, 0L, NA_integer_, NA_integer_, NA_integer_, 3L),
+  `Weighted N (national estimate)` = c(0L, 0L, 0L, NA_integer_, NA_integer_, NA_integer_, 15L)
+)
+
+nis_sheet %>%
+  kable(caption=paste0(
+    "NIS 2023 Facial Nerve Repair \u2014 Inpatient Database Results. ",
+    "Source: HCUP National Inpatient Sample (NIS) 2023. ",
+    "Carried forward from primary analysis. ",
+    "Individual PNS code breakdown not reported per HCUP cell size restrictions (<11). ",
+    "NA = suppressed. CNS = Central Nervous System (section 00); ",
+    "PNS = Peripheral Nervous System (section 01).")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=TRUE) %>%
+  row_spec(7, bold=TRUE, background="#EBF4FB") %>%
+  row_spec(1:3, color="grey")
+```
+
+# Publication Figures
+
+## Figure 1 — Study Population Flow Diagram
+
+```{r fig-flow}
+g1_n <- nrow(enc_all)
+g1_w <- round(total_g1_w)
+g2_n <- sum(enc_all$had_repair==1)
+g2_w <- round(total_repair_w)
+g3_n <- sum(enc_all$had_repair==0)
+g3_w <- round(total_norepair_w)
+
+flow <- grViz(paste0('
+digraph flow {
+  graph [layout=dot, rankdir=TB, fontname="Arial", nodesep=0.7, ranksep=0.9]
+  node [shape=rectangle, style="filled,rounded", fontname="Arial",
+        fontsize=11, margin="0.25,0.15", penwidth=1.5]
+
+  A [label="HCUP NASS 2016-2023\\nFull Ambulatory Surgery Sample\\n(all encounter years combined)",
+     fillcolor="#1A5276", fontcolor=white, color="#1A5276"]
+
+  B [label="Group 1: Traumatic Facial Nerve Laceration\\nUnweighted N = ', format(g1_n, big.mark=","), '\\nWeighted national estimate = ', format(g1_w, big.mark=","), '\\n\\nInclusion criteria (either A or B):\\nA. S04.5 family code co-occurring with\\n    S01.* (head) or S11.* (neck) open wound\\n    OR external cause code (W25-W27, W45,\\n    X99, Y28, V01-V99)\\nB. CPT 64864 or 64865 co-occurring with\\n    S01.* or S11.* open wound code",
+     fillcolor="#2E86C1", fontcolor=white, color="#2175A9"]
+
+  C [label="Group 2: Traumatic Facial Nerve Laceration WITH Repair\\nUnweighted N = ', format(g2_n, big.mark=","), '  |  Weighted N = ', format(g2_w, big.mark=","), '\\n\\nInclusion criteria:\\nAny encounter from Group 1\\nco-occurring with CPT for facial nerve suture\\n(CPT 64864 or CPT 64865)",
+     fillcolor="#EBF5FB", fontcolor="#1A5276", color="#2E86C1"]
+
+  D [label="Group 3: Traumatic Facial Nerve Laceration WITHOUT Repair\\nUnweighted N = ', format(g3_n, big.mark=","), '  |  Weighted N = ', format(g3_w, big.mark=","), '\\n\\nInclusion criteria:\\nGroup 1 minus Group 2\\n(no qualifying CPT code for facial nerve suture present)",
+     fillcolor="#FEF9E7", fontcolor="#7D6608", color="#D4AC0D"]
+
+  A -> B [label="  Injury identification", fontname="Arial", fontsize=10,
+          color="#566573", style=bold]
+  B -> C [label="  CPT repair\\n  code present", fontname="Arial",
+          fontsize=10, color="#2E86C1", style=bold, fontcolor="#2E86C1"]
+  B -> D [label="  No CPT repair\\n  code present", fontname="Arial",
+          fontsize=10, color="#D4AC0D", style=bold, fontcolor="#D4AC0D"]
+}'))
+
+flow
+```
+
+```{r save-flow}
+#| cache: false
+tryCatch({
+  svg_txt  <- export_svg(flow)
+  svg_path <- tempfile(fileext=".svg")
+  writeLines(svg_txt, svg_path)
+  rsvg_png(svg_path,
+           file  = file.path(fig_dir, "fig1_flow_diagram.png"),
+           width = 1200)
+  rsvg_pdf(svg_path,
+           file  = file.path(fig_dir, "fig1_flow_diagram.pdf"))
+  message("Flow diagram saved as PNG and PDF.")
+}, error = function(e) {
+  message("Flow diagram save error: ", e$message)
+})
+```
+
+## Figure 2 — Repair Trend by Year
+
+```{r fig-trend}
+trend_data <- sheet4 %>%
+  mutate(
+    Year     = as.integer(Year),
+    repair_w = `Repair (weighted N)`,
+    injury_w = `Traumatic facial nerve injury (weighted N)`,
+    pct      = `Repair rate — weighted (%)`
+  )
+
+max_w <- max(trend_data$injury_w, na.rm=TRUE)
+
+fig_trend <- ggplot(trend_data, aes(x=Year)) +
+  geom_col(aes(y=injury_w, fill="All traumatic facial nerve laceration"),
+           width=0.6, alpha=0.5) +
+  geom_col(aes(y=repair_w, fill="With repair"), width=0.6) +
+  geom_line(aes(y=pct*max_w/100), color="#C00000",
+            linewidth=1.2, linetype="dashed") +
+  geom_point(aes(y=pct*max_w/100), color="#C00000", size=3) +
+  geom_text(aes(y=pct*max_w/100, label=paste0(pct,"%")),
+            vjust=-0.9, size=3.5, color="#C00000", fontface="bold") +
+  scale_y_continuous(
+    name=  "Weighted encounters (N)", labels=label_comma(),
+    sec.axis=sec_axis(~.*100/max_w, name="Repair rate (%)",
+                      labels=function(x) paste0(x,"%"))) +
+  scale_x_continuous(breaks=2016:2023) +
+  scale_fill_manual(values=c("All traumatic facial nerve laceration"="#4E79A7",
+                              "With repair"="#F28E2B")) +
+  labs(title="Traumatic Facial Nerve Laceration Encounters and Repair Rate by Year",
+       subtitle="HCUP NASS 2016\u20132023 | Weighted national estimates",
+       x="Year", fill=NULL,
+       caption="Dashed red line = weighted repair rate (right axis)") +
+  theme_classic(base_size=12) +
+  theme(legend.position="bottom", plot.title=element_text(face="bold"),
+        axis.title=element_text(face="bold"))
+
+fig_trend
+ggsave(file.path(fig_dir,"fig2_repair_trend.pdf"),
+       fig_trend, width=10, height=6)
+ggsave(file.path(fig_dir,"fig2_repair_trend.png"),
+       fig_trend, width=10, height=6, dpi=300)
+```
+
+## Figure 3 — Forest Plot
+
+```{r fig-forest}
+#| cache: false
+forest_data <- or_df %>%
+  mutate(
+    label = term_map[term],
+    group = case_when(
+      str_starts(term,"sex")          ~ "Sex",
+      str_starts(term,"age_group")    ~ "Age group",
+      str_starts(term,"race")         ~ "Race",
+      str_starts(term,"income_qrtl")  ~ "Income quartile",
+      str_starts(term,"insurance")    ~ "Insurance type",
+      str_starts(term,"hosp_region")  ~ "Hospital region",
+      TRUE ~ "Other")
+  ) %>%
+  filter(!is.na(label),
+         !str_starts(term, "hosp_location"),
+         !str_starts(term, "hosp_teach")) %>%
+  mutate(label=factor(label, levels=rev(unique(label))),
+         sig=`Pr(>|t|)` < 0.05)
+
+fig_forest <- ggplot(forest_data,
+                     aes(x=OR, y=label, xmin=lower, xmax=upper, color=sig)) +
+  geom_vline(xintercept=1, linetype="dashed", color="grey50", linewidth=0.8) +
+  geom_errorbarh(height=0.3, linewidth=0.7) +
+  geom_point(size=3) +
+  geom_text(aes(x=upper,
+                label=paste0(sprintf("%.2f",OR)," (",
+                             sprintf("%.2f",lower),"\u2013",
+                             sprintf("%.2f",upper),")")),
+            hjust=-0.1, size=2.8, color="black") +
+  scale_color_manual(values=c("FALSE"="grey50","TRUE"="#C00000"),
+                     labels=c("FALSE"="p\u22650.05","TRUE"="p<0.05"),name="") +
+  scale_x_log10(limits=c(0.05,25),
+                breaks=c(0.1,0.25,0.5,1,2,5,10),
+                labels=c("0.1","0.25","0.5","1","2","5","10")) +
+  facet_grid(group~., scales="free_y", space="free_y") +
+  labs(title="Multivariable Logistic Regression for Odds of Facial Nerve Repair",
+       subtitle="Adjusted odds ratios | HCUP NASS 2016\u20132023",
+       x="Adjusted Odds Ratio (log scale)", y=NULL,
+       caption=paste0("Reference: Male, Age 18-34, White, 76th-100th income quartile,\n",
+                      "Private insurance, South region. Error bars = 95% CI.\n",
+                      "Hospital location and teaching status included in model but",
+                      " not shown.")) +
+  theme_classic(base_size=11) +
+  theme(strip.text=element_text(face="bold", size=9),
+        strip.background=element_rect(fill="#EBF4FB", color=NA),
+        plot.title=element_text(face="bold"), legend.position="bottom")
+
+fig_forest
+ggsave(file.path(fig_dir,"fig3_forest_plot.pdf"),
+       fig_forest, width=10, height=10)
+ggsave(file.path(fig_dir,"fig3_forest_plot.png"),
+       fig_forest, width=10, height=10, dpi=300)
+```
+
+## Figure 4 — Geographic Heat Map
+
+```{r fig-heatmap}
+region_data <- enc_all %>%
+  filter(!is.na(hosp_region)) %>%
+  group_by(hosp_region) %>%
+  summarise(repair_rate_w=round(
+    100*sum(discwt[had_repair==1],na.rm=TRUE)/sum(discwt,na.rm=TRUE),2),
+    .groups="drop")
+
+state_region <- tibble(
+  state=c("connecticut","maine","massachusetts","new hampshire","rhode island",
+          "vermont","new jersey","new york","pennsylvania",
+          "illinois","indiana","michigan","ohio","wisconsin","iowa","kansas",
+          "minnesota","missouri","nebraska","north dakota","south dakota",
+          "delaware","florida","georgia","maryland","north carolina",
+          "south carolina","virginia","west virginia","alabama","kentucky",
+          "mississippi","tennessee","arkansas","louisiana","oklahoma","texas",
+          "district of columbia","arizona","colorado","idaho","montana",
+          "nevada","new mexico","utah","wyoming","alaska","california",
+          "hawaii","oregon","washington"),
+  hosp_region=c(rep("Northeast",9),rep("Midwest",12),
+                rep("South",17),   rep("West",13))
+)
+
+us_map <- map_data("state") %>%
+  left_join(state_region, by=c("region"="state")) %>%
+  left_join(region_data, by="hosp_region")
+
+region_centers <- us_map %>%
+  group_by(hosp_region, repair_rate_w) %>%
+  summarise(long=mean(long,na.rm=TRUE), lat=mean(lat,na.rm=TRUE),
+            .groups="drop") %>%
+  filter(!is.na(hosp_region))
+
+fig_map <- ggplot(us_map, aes(x=long, y=lat, group=group, fill=repair_rate_w)) +
+  geom_polygon(color="white", linewidth=0.3) +
+  geom_text(data=region_centers,
+            aes(x=long, y=lat,
+                label=paste0(hosp_region,"\n",repair_rate_w,"%"), group=NULL),
+            size=3.5, fontface="bold", color="white") +
+  scale_fill_gradient(low="#D6EAF8", high="#1A5276",
+                      name="Repair rate\n(weighted %)", na.value="grey85") +
+  coord_map("albers", lat0=39, lat1=45) +
+  labs(title="Traumatic Facial Nerve Repair Rate by U.S. Census Region",
+       subtitle="HCUP NASS 2016\u20132023 | Weighted national estimates",
+       caption=paste0("State shading reflects the repair rate for its Census region.\n",
+                      "State-level estimates suppressed per HCUP cell size restrictions.\n",
+                      "NOTE: 2023 HOSP_REGION not available in NASS Hospital file; ",
+                      "regional estimates reflect 2016\u20132022 data only."),
+       x=NULL, y=NULL) +
+  theme_void(base_size=12) +
+  theme(plot.title=element_text(face="bold", hjust=0.5),
+        plot.subtitle=element_text(hjust=0.5, color="grey40"),
+        plot.caption=element_text(hjust=0.5, size=9, color="grey50"),
+        legend.position="right")
+
+fig_map
+ggsave(file.path(fig_dir,"fig4_heatmap_region.pdf"),
+       fig_map, width=12, height=7)
+ggsave(file.path(fig_dir,"fig4_heatmap_region.png"),
+       fig_map, width=12, height=7, dpi=300)
+```
+
+## Figure 5 — IPTW: Effect of Repair on Total Charges
+
+```{r fig-iptw}
+#| cache: true
+iptw_data <- enc_all %>%
+  filter(!is.na(totchg), totchg>0,
+         !is.na(sex), !is.na(age_group), !is.na(race),
+         !is.na(income_qrtl), !is.na(insurance),
+         !is.na(hosp_region), !is.na(hosp_location), !is.na(hosp_teach)) %>%
+  mutate(
+    had_repair    = as.integer(had_repair),
+    sex           = factor(sex),
+    age_group     = factor(age_group, levels=age_labels),
+    race          = factor(race),
+    income_qrtl   = factor(income_qrtl),
+    insurance     = factor(insurance),
+    hosp_region   = factor(hosp_region),
+    hosp_location = factor(hosp_location),
+    hosp_teach    = factor(hosp_teach)
+  )
+
+set.seed(42)
+w_out <- weightit(
+  had_repair ~ sex + age_group + race + income_qrtl + insurance +
+               hosp_region + hosp_location + hosp_teach,
+  data=iptw_data, method="ps", estimand="ATE"
+)
+
+iptw_data$iptw_weight <- w_out$weights * iptw_data$discwt
+
+svy_iptw   <- svydesign(ids=~hosp_id, weights=~iptw_weight,
+                         data=iptw_data, nest=TRUE)
+iptw_model <- svyglm(log(totchg) ~ had_repair,
+                     design=svy_iptw, family=gaussian())
+
+iptw_coef <- summary(iptw_model)$coefficients
+eff_pct   <- round((exp(iptw_coef["had_repair","Estimate"])-1)*100, 1)
+ci_lo     <- round((exp(iptw_coef["had_repair","Estimate"] -
+                        1.96*iptw_coef["had_repair","Std. Error"])-1)*100,1)
+ci_hi     <- round((exp(iptw_coef["had_repair","Estimate"] +
+                        1.96*iptw_coef["had_repair","Std. Error"])-1)*100,1)
+iptw_p    <- fmt_p(iptw_coef["had_repair","Pr(>|t|)"])
+
+iptw_excel <- tibble(
+  Metric = c(
+    "Method",
+    "Outcome variable",
+    "Treatment variable",
+    "Covariates balanced",
+    "IPTW estimand",
+    "No repair \u2014 median total charges (unweighted)",
+    "With repair \u2014 median total charges (unweighted)",
+    "Effect of repair on charges (IPTW-adjusted)",
+    "95% Confidence interval",
+    "p value",
+    "Interpretation"
+  ),
+  Value = c(
+    "Inverse Probability of Treatment Weighting (IPTW) using propensity scores (WeightIt package)",
+    "Log total charges",
+    "Had repair (CPT 64864 or 64865) vs no repair",
+    "Sex, age group, race, income quartile, insurance type, hospital region, location, teaching status",
+    "Average Treatment Effect (ATE)",
+    paste0("$", format(round(median(iptw_data$totchg[iptw_data$had_repair==0],
+                                    na.rm=TRUE)), big.mark=",")),
+    paste0("$", format(round(median(iptw_data$totchg[iptw_data$had_repair==1],
+                                    na.rm=TRUE)), big.mark=",")),
+    paste0(eff_pct, "% higher charges associated with repair"),
+    paste0(ci_lo, "% to ", ci_hi, "%"),
+    iptw_p,
+    paste0("After balancing patient and hospital characteristics via IPTW, ",
+           "facial nerve repair was associated with a ", eff_pct,
+           "% increase in total charges (95% CI: ", ci_lo, "% to ", ci_hi,
+           "%, p=", iptw_p, ").")
+  )
+)
+
+fig_iptw <- ggplot(iptw_data, aes(x=log(totchg), fill=factor(had_repair))) +
+  geom_density(alpha=0.6) +
+  scale_fill_manual(values=c("0"="#4E79A7","1"="#F28E2B"),
+                    labels=c("0"="No repair","1"="With repair"), name="") +
+  labs(title="Distribution of Log Total Charges by Repair Status",
+       subtitle=paste0("IPTW-adjusted. Repair associated with ",
+                       eff_pct,"% change in charges (p=",iptw_p,")"),
+       x="Log total charges", y="Density") +
+  theme_classic(base_size=12) +
+  theme(plot.title=element_text(face="bold"), legend.position="bottom")
+
+fig_iptw
+ggsave(file.path(fig_dir,"fig5_iptw_charges.pdf"),
+       fig_iptw, width=9, height=6)
+ggsave(file.path(fig_dir,"fig5_iptw_charges.png"),
+       fig_iptw, width=9, height=6, dpi=300)
+```
+
+# Sensitivity Analyses
+
+## Sensitivity Analysis 1 — Criterion A Only (no external cause, no Criterion B)
+
+```{r sensitivity-1}
+#| cache: false
+# Criterion A restricted to S04.5 + (S01.* OR S11.*), excluding the external
+# cause path AND excluding Criterion B (procedural pathway).
+sens1_data <- enc_all %>%
+  filter(flag_s045 & (flag_s01 | flag_s11))
+
+sens1_g1_unw <- nrow(sens1_data)
+sens1_g1_w   <- round(sum(sens1_data$discwt, na.rm=TRUE))
+sens1_g2_unw <- sum(sens1_data$had_repair == 1)
+sens1_g2_w   <- round(sum(sens1_data$discwt[sens1_data$had_repair == 1], na.rm=TRUE))
+sens1_g3_unw <- sens1_g1_unw - sens1_g2_unw
+sens1_g3_w   <- sens1_g1_w - sens1_g2_w
+sens1_rate   <- if (sens1_g1_w > 0) round(100*sens1_g2_w/sens1_g1_w, 1) else NA_real_
+
+sens1_tbl <- tibble(
+  Metric = c(
+    "Group 1 unweighted N",
+    "Group 1 weighted N",
+    "Group 2 unweighted N",
+    "Group 2 weighted N",
+    "Group 3 unweighted N",
+    "Group 3 weighted N",
+    "Overall repair rate (%)"
+  ),
+  Value = c(
+    format(sens1_g1_unw, big.mark=","),
+    format(sens1_g1_w,   big.mark=","),
+    format(sens1_g2_unw, big.mark=","),
+    format(sens1_g2_w,   big.mark=","),
+    format(sens1_g3_unw, big.mark=","),
+    format(sens1_g3_w,   big.mark=","),
+    paste0(sens1_rate, "%")
+  )
+)
+
+sens1_tbl %>%
+  kable(caption=paste0(
+    "Sensitivity Analysis 1 \u2014 Criterion A only. ",
+    "Group 1 restricted to S04.5 co-occurring with S01.* or S11.*, ",
+    "excluding the external-cause-only path and excluding the Criterion B ",
+    "procedural pathway. HCUP NASS 2016\u20132023.")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=FALSE)
+```
+
+## Sensitivity Analysis 2 — Highest Mechanistic Specificity
+
+```{r sensitivity-2}
+#| cache: false
+# Highest mechanistic specificity: S04.5 + (S01.* OR S11.*) AND external cause
+sens2_data <- enc_all %>%
+  filter(flag_s045 & (flag_s01 | flag_s11) & flag_extcause)
+
+sens2_g1_unw <- nrow(sens2_data)
+sens2_g1_w   <- round(sum(sens2_data$discwt, na.rm=TRUE))
+sens2_g2_unw <- sum(sens2_data$had_repair == 1)
+sens2_g2_w   <- round(sum(sens2_data$discwt[sens2_data$had_repair == 1], na.rm=TRUE))
+sens2_g3_unw <- sens2_g1_unw - sens2_g2_unw
+sens2_g3_w   <- sens2_g1_w - sens2_g2_w
+sens2_rate   <- if (sens2_g1_w > 0) round(100*sens2_g2_w/sens2_g1_w, 1) else NA_real_
+
+sens2_tbl <- tibble(
+  Metric = c(
+    "Group 1 unweighted N",
+    "Group 1 weighted N",
+    "Group 2 unweighted N",
+    "Group 2 weighted N",
+    "Group 3 unweighted N",
+    "Group 3 weighted N",
+    "Overall repair rate (%)"
+  ),
+  Value = c(
+    format(sens2_g1_unw, big.mark=","),
+    format(sens2_g1_w,   big.mark=","),
+    format(sens2_g2_unw, big.mark=","),
+    format(sens2_g2_w,   big.mark=","),
+    format(sens2_g3_unw, big.mark=","),
+    format(sens2_g3_w,   big.mark=","),
+    paste0(sens2_rate, "%")
+  )
+)
+
+sens2_tbl %>%
+  kable(caption=paste0(
+    "Sensitivity Analysis 2 \u2014 Highest mechanistic specificity. ",
+    "Group 1 restricted to S04.5 co-occurring with S01.* or S11.* AND an ",
+    "external cause code (W25\u2013W27, W45, X99, Y28, V01\u2013V99). ",
+    "HCUP NASS 2016\u20132023.")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=FALSE)
+```
+
+## Sensitivity Analysis 3 — Maximum Specificity (Laterality + Anatomic Wound + External Cause)
+
+```{r sensitivity-3}
+#| cache: false
+# Laterality-specified facial nerve injury (S04.51* right, S04.52* left)
+# PLUS anatomically concordant facial wound:
+#   S01.1* = eyelid/periocular, S01.3* = ear, S01.4* = cheek/TMJ,
+#   S01.5* = lip/oral cavity,   S01.81* = other part of face
+# PLUS external cause sharp object or transport mechanism
+#   (W25-W27, W45, X99, Y28, V01-V99 — already captured as flag_extcause)
+# Group 2 = Group 1 + CPT 64864/64865 (= had_repair == 1)
+
+sa3_g1 <- enc_all$flag_sa3_nerve & enc_all$flag_sa3_wound & enc_all$flag_extcause
+
+sa3_g1_unw <- sum(sa3_g1)
+sa3_g1_w   <- round(sum(enc_all$discwt[sa3_g1], na.rm=TRUE))
+sa3_g2_unw <- sum(sa3_g1 & enc_all$had_repair == 1)
+sa3_g2_w   <- round(sum(enc_all$discwt[sa3_g1 & enc_all$had_repair == 1], na.rm=TRUE))
+sa3_g3_unw <- sa3_g1_unw - sa3_g2_unw
+sa3_g3_w   <- sa3_g1_w - sa3_g2_w
+sa3_rate   <- if (sa3_g1_w > 0) round(100 * sa3_g2_w / sa3_g1_w, 1) else NA_real_
+
+message("=== Sensitivity Analysis 3 ===")
+message("Group 1 unweighted: ", format(sa3_g1_unw, big.mark=","))
+message("Group 1 weighted:   ", format(sa3_g1_w,   big.mark=","))
+message("Repair rate:        ", sa3_rate, "%")
+
+# Note if flag_extcause finds no rows — may indicate external cause codes
+# were not present in the data for the qualifying nerve/wound population
+if (sa3_g1_unw == 0) {
+  warning("Sensitivity Analysis 3: zero qualifying encounters. ",
+          "External cause codes (W25-W27, W45, X99, Y28, V*) may not be ",
+          "available in NASS for this population. Verify flag_extcause.")
+}
+
+sens3_tbl <- tibble(
+  Metric = c(
+    "Group 1 unweighted N",
+    "Group 1 weighted N",
+    "Group 2 unweighted N",
+    "Group 2 weighted N",
+    "Group 3 unweighted N",
+    "Group 3 weighted N",
+    "Overall repair rate (%)"
+  ),
+  Value = c(
+    format(sa3_g1_unw, big.mark=","),
+    format(sa3_g1_w,   big.mark=","),
+    format(sa3_g2_unw, big.mark=","),
+    format(sa3_g2_w,   big.mark=","),
+    format(sa3_g3_unw, big.mark=","),
+    format(sa3_g3_w,   big.mark=","),
+    paste0(sa3_rate, "%")
+  )
+)
+
+sens3_tbl %>%
+  kable(caption=paste0(
+    "Sensitivity Analysis 3 \u2014 Maximum Specificity. ",
+    "Requires laterality-specified facial nerve injury (S04.51* or S04.52*) ",
+    "co-occurring with anatomically concordant facial wound ",
+    "(S01.1*, S01.3*, S01.4*, S01.5*, or S01.81*) AND external cause code ",
+    "(W25\u2013W27, W45, X99, Y28, V01\u2013V99). ",
+    "Group 2 = Group 1 + CPT 64864 or 64865. ",
+    "HCUP NASS 2016\u20132023. Weighted estimates use DISCWT.")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=FALSE)
+```
+
+# Phase 1 vs Phase 2 Comparison (Internal Quality Check)
+
+```{r phase1-vs-phase2}
+#| cache: false
+# Internal investigator quality check only — does NOT appear in manuscript.
+# Confirms Phase 2 produces a more complete cohort and that direction of
+# significant predictors is consistent across definitions.
+
+# Helper: pull a Phase 2 OR row by its display label
+get_or_row <- function(label) {
+  key <- names(term_map)[term_map == label]
+  r   <- or_df %>% filter(term %in% key)
+  if (nrow(r) == 0) return("not estimated")
+  paste0(sprintf("%.2f",r$OR[1])," (95% CI ",
+         sprintf("%.2f",r$lower[1]),"\u2013",
+         sprintf("%.2f",r$upper[1]),"), p=", r$p_fmt[1])
+}
+
+phase2_overall_rate <- round(100*total_repair_w/total_g1_w, 1)
+phase2_iptw_text    <- paste0(eff_pct, "%, p=", iptw_p)
+phase2_teach_text   <- paste0("p=", teach_ttest_norep)
+
+phase_compare <- tibble(
+  Metric = c(
+    "Group 1 unweighted N",
+    "Group 1 weighted N",
+    "Group 2 unweighted N",
+    "Group 2 weighted N",
+    "Group 3 unweighted N",
+    "Group 3 weighted N",
+    "Overall repair rate",
+    "Age 55\u201365 OR",
+    "Age 65+ OR",
+    "Midwest OR",
+    "West OR",
+    "IPTW charge increase with repair",
+    "Teaching vs nonteaching charge difference (no repair)"
+  ),
+  `Phase 1 Value` = c(
+    "1,656",
+    "2,276",
+    "488",
+    "664",
+    "1,168",
+    "1,613",
+    "29.2%",
+    "0.32 (95% CI 0.18\u20130.57), p<0.001",
+    "0.41 (95% CI 0.20\u20130.85), p=0.018",
+    "1.63 (95% CI 1.10\u20132.41), p=0.015",
+    "1.81 (95% CI 1.05\u20133.10), p=0.033",
+    "34.9%, p<0.001",
+    "Significant, p<0.001"
+  ),
+  `Phase 2 Value` = c(
+    format(nrow(enc_all), big.mark=","),
+    format(round(total_g1_w), big.mark=","),
+    format(sum(enc_all$had_repair==1), big.mark=","),
+    format(round(total_repair_w), big.mark=","),
+    format(sum(enc_all$had_repair==0), big.mark=","),
+    format(round(total_norepair_w), big.mark=","),
+    paste0(phase2_overall_rate, "%"),
+    get_or_row("55-65"),
+    get_or_row("65+"),
+    get_or_row("Midwest"),
+    get_or_row("West"),
+    phase2_iptw_text,
+    phase2_teach_text
+  )
+)
+
+phase_compare %>%
+  kable(caption=paste0(
+    "Phase 1 vs Phase 2 Comparison \u2014 Internal Quality Check. ",
+    "Investigator use only; does not appear in the Phase 2 manuscript.")) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=TRUE)
+
+# Sanity check on the bias-correction direction
+if (phase2_overall_rate > 29.2) {
+  warning("Phase 2 overall repair rate (", phase2_overall_rate,
+          "%) is HIGHER than Phase 1 (29.2%). Per Phase 2 design rationale, ",
+          "this should not happen — review extraction logic.")
+} else {
+  message("Phase 2 overall repair rate = ", phase2_overall_rate,
+          "% (Phase 1 = 29.2%); bias-correction direction is as expected.")
+}
+```
+
+# Excel Output
+
+```{r excel-output}
+#| cache: false
+wb <- createWorkbook()
+
+title_s  <- createStyle(fontName="Arial",fontSize=12,textDecoration="bold")
+header_s <- createStyle(fontName="Arial",fontSize=11,textDecoration="bold",
+                        border="TopBottom",borderStyle="medium",
+                        halign="center",wrapText=TRUE)
+group_s  <- createStyle(fontName="Arial",fontSize=11,textDecoration="bold")
+data_s   <- createStyle(fontName="Arial",fontSize=11,halign="left")
+center_s <- createStyle(fontName="Arial",fontSize=11,halign="center")
+ref_s    <- createStyle(fontName="Arial",fontSize=11,
+                        fontColour="#808080",halign="center")
+bot_s    <- createStyle(fontName="Arial",fontSize=11,
+                        border="Bottom",borderStyle="medium")
+note_s   <- createStyle(fontName="Arial",fontSize=9,
+                        wrapText=TRUE,valign="top")
+
+write_table_sheet <- function(wb, sname, title, tbl,
+                              grp_id_col, footnote, ref_col=NULL) {
+  n <- ncol(tbl)
+  addWorksheet(wb, sname)
+  writeData(wb, sname, title, startRow=1, startCol=1)
+  addStyle(wb, sname, title_s, rows=1, cols=1)
+  writeData(wb, sname, as.data.frame(t(names(tbl))),
+            startRow=2, startCol=1, colNames=FALSE)
+  addStyle(wb, sname, header_s, rows=2, cols=1:n, gridExpand=TRUE)
+  grp_labels <- tbl[[1]][is.na(tbl[[grp_id_col]]) &
+                          !str_starts(tbl[[1]],"   ")]
+  for (i in seq_len(nrow(tbl))) {
+    re     <- i + 2
+    cv     <- tbl[[1]][i]
+    is_grp <- cv %in% grp_labels
+    is_ref <- !is.null(ref_col) && !is.na(tbl[[ref_col]][i]) &&
+               tbl[[ref_col]][i] == "Reference"
+    writeData(wb, sname, tbl[i,], startRow=re, startCol=1, colNames=FALSE)
+    if (is_grp) {
+      addStyle(wb, sname, group_s, rows=re, cols=1:n, gridExpand=TRUE)
+    } else {
+      addStyle(wb, sname, data_s, rows=re, cols=1)
+      addStyle(wb, sname, if(is_ref) ref_s else center_s,
+               rows=re, cols=2:n, gridExpand=TRUE)
+    }
+  }
+  lr <- nrow(tbl) + 2
+  addStyle(wb, sname, bot_s, rows=lr, cols=1:n, gridExpand=TRUE)
+  setColWidths(wb, sname, cols=1, widths=38)
+  setColWidths(wb, sname, cols=2:n, widths=20)
+  fn <- lr + 2
+  writeData(wb, sname, footnote, startRow=fn, startCol=1)
+  mergeCells(wb, sname, cols=1:n, rows=fn)
+  addStyle(wb, sname, note_s, rows=fn, cols=1)
+  setRowHeights(wb, sname, rows=fn, heights=70)
+}
+
+# ── Sheet 1 ──────────────────────────────────────────────────────────────────
+write_table_sheet(wb, "Sheet 1",
+  paste0("National Estimates of Patient and Hospital Characteristics by ",
+         "Facial Nerve Repair Status, Including Repair Rates"),
+  sheet1, grp_id_col="No Repair (n, %)",
+  footnote=paste0(
+    "HCUP NASS 2016\u20132023. Total = All patients with traumatic facial nerve ",
+    "laceration nationally. Group 1 (Phase 2) = encounters meeting Criterion A ",
+    "(S04.5 co-occurring with S01.*, S11.*, or external cause code) OR ",
+    "Criterion B (CPT 64864/64865 co-occurring with S01.* or S11.*). ",
+    "Group 2 (Repair) = CPT 64864 or 64865 within Group 1. ",
+    "Group 3 (No Repair) = Group 1 minus Group 2. All values are weighted ",
+    "national estimates using DISCWT discharge weight. Repair Rate = Weighted repair ",
+    "encounters / Weighted Group 1 encounters x 100. Age mean \u00b1 SD estimated ",
+    "using age group midpoints with discharge weights. NOTE: HOSP_REGION was not ",
+    "available in the 2023 NASS Hospital file; regional estimates reflect ",
+    "2016\u20132022 data only."))
+
+# ── Sheet 2 ──────────────────────────────────────────────────────────────────
+write_table_sheet(wb, "Sheet 2",
+  "Multivariable Logistic Regression for Odds of Facial Nerve Repair",
+  sheet2, grp_id_col="Adjusted OR (95% CI)",
+  ref_col="Adjusted OR (95% CI)",
+  footnote=paste0(
+    "Survey-weighted multivariable logistic regression (svyglm, quasibinomial). ",
+    "HCUP NASS 2016\u20132023. Reference categories: Male, Age 18-34, White, ",
+    "76th-100th income quartile, Private insurance, South region, Urban, ",
+    "Nonteaching hospital. OR = odds ratio; CI = 95% confidence interval. ",
+    "Significant predictors (p<0.05): ", sig_pred_text, "."))
+
+# ── Sheet 4 ──────────────────────────────────────────────────────────────────
+addWorksheet(wb, "Sheet 4")
+writeData(wb, "Sheet 4", "Repair Rates by Year", startRow=1, startCol=1)
+addStyle(wb, "Sheet 4", title_s, rows=1, cols=1)
+writeData(wb, "Sheet 4", sheet4, startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "Sheet 4", header_s, rows=3, cols=1:6, gridExpand=TRUE)
+addStyle(wb, "Sheet 4", data_s, rows=4:(nrow(sheet4)+3), cols=1:6, gridExpand=TRUE)
+setColWidths(wb, "Sheet 4", cols=1, widths=10)
+setColWidths(wb, "Sheet 4", cols=2:6, widths=28)
+fn4 <- nrow(sheet4)+5
+writeData(wb, "Sheet 4",
+  paste0("HCUP NASS 2016\u20132023. Weighted estimates use DISCWT discharge weight. ",
+       "Repair rate = Weighted repair / Weighted total injury x 100. ",
+       "Chi-square test for difference in repair rates across years: p = ", year_p, "."),
+  startRow=fn4, startCol=1)
+mergeCells(wb, "Sheet 4", cols=1:6, rows=fn4)
+addStyle(wb, "Sheet 4", note_s, rows=fn4, cols=1)
+setRowHeights(wb, "Sheet 4", rows=fn4, heights=40)
+
+# ── Sheet 5 ──────────────────────────────────────────────────────────────────
+addWorksheet(wb, "Sheet 5")
+writeData(wb, "Sheet 5", "Charge Analysis: Repair vs No Repair",
+          startRow=1, startCol=1)
+addStyle(wb, "Sheet 5", title_s, rows=1, cols=1)
+writeData(wb, "Sheet 5", sheet5, startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "Sheet 5", header_s, rows=3, cols=1:5, gridExpand=TRUE)
+grp5 <- sheet5$Characteristic[is.na(sheet5$`No Repair Median (IQR)`) &
+                               !str_starts(sheet5$Characteristic,"   ")]
+for (i in seq_len(nrow(sheet5))) {
+  re <- i+3
+  if (sheet5$Characteristic[i] %in% grp5) {
+    addStyle(wb, "Sheet 5", group_s, rows=re, cols=1:5, gridExpand=TRUE)
+  } else {
+    addStyle(wb, "Sheet 5", data_s,   rows=re, cols=1)
+    addStyle(wb, "Sheet 5", center_s, rows=re, cols=2:5, gridExpand=TRUE)
+  }
+}
+addStyle(wb, "Sheet 5", bot_s, rows=nrow(sheet5)+3, cols=1:5, gridExpand=TRUE)
+setColWidths(wb, "Sheet 5", cols=1, widths=35)
+setColWidths(wb, "Sheet 5", cols=2:5, widths=28)
+fn5 <- nrow(sheet5)+5
+writeData(wb, "Sheet 5",
+  paste0("Median (IQR) weighted national estimates. HCUP NASS 2016\u20132023. ",
+         "Insurance type p-values: survey-weighted ANOVA on log-charges within ",
+         "no-repair group and within repair group separately. ",
+         "Teaching status p-values: survey-weighted t-test on log-charges ",
+         "comparing Nonteaching vs Teaching within each repair group."),
+  startRow=fn5, startCol=1)
+mergeCells(wb, "Sheet 5", cols=1:5, rows=fn5)
+addStyle(wb, "Sheet 5", note_s, rows=fn5, cols=1)
+setRowHeights(wb, "Sheet 5", rows=fn5, heights=55)
+
+# ── NIS 2023 Sheet ────────────────────────────────────────────────────────────
+addWorksheet(wb, "NIS 2023 Inpatient Results")
+writeData(wb, "NIS 2023 Inpatient Results",
+          "NIS 2023 Facial Nerve Repair \u2014 Inpatient Database Results",
+          startRow=1, startCol=1)
+addStyle(wb, "NIS 2023 Inpatient Results", title_s, rows=1, cols=1)
+mergeCells(wb, "NIS 2023 Inpatient Results", cols=1:4, rows=1)
+writeData(wb, "NIS 2023 Inpatient Results", nis_sheet,
+          startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "NIS 2023 Inpatient Results", header_s, rows=3, cols=1:4,
+         gridExpand=TRUE)
+for (i in seq_len(nrow(nis_sheet))) {
+  re       <- i + 3
+  is_cns   <- i <= 3
+  is_total <- i == 7
+  bg <- if (is_total) "#EBF4FB" else "white"
+  fc <- if (is_cns) "#999999" else "black"
+
+  if (is_total) {
+    sty <- createStyle(fontName="Arial", fontSize=11,
+                       fontColour=fc, fgFill=bg,
+                       textDecoration="bold")
+  } else {
+    sty <- createStyle(fontName="Arial", fontSize=11,
+                       fontColour=fc, fgFill=bg)
+  }
+  addStyle(wb, "NIS 2023 Inpatient Results", sty,
+           rows=re, cols=1:4, gridExpand=TRUE)
+}
+addStyle(wb, "NIS 2023 Inpatient Results", bot_s,
+         rows=nrow(nis_sheet)+3, cols=1:4, gridExpand=TRUE)
+setColWidths(wb, "NIS 2023 Inpatient Results", cols=1, widths=20)
+setColWidths(wb, "NIS 2023 Inpatient Results", cols=2, widths=52)
+setColWidths(wb, "NIS 2023 Inpatient Results", cols=3:4, widths=22)
+fn_nis <- nrow(nis_sheet)+5
+writeData(wb, "NIS 2023 Inpatient Results",
+  paste0("Source: HCUP National Inpatient Sample (NIS) 2023. ",
+         "Carried forward from primary analysis. ",
+         "ICD-10-PCS codes 01QM0ZZ, 01QM3ZZ, 01QM4ZZ searched (PNS section). ",
+         "CNS section codes 00QM0/3/4ZZ returned 0 encounters. ",
+         "Individual PNS code breakdown suppressed per HCUP cell size restrictions (<11). ",
+         "Weighted estimate uses NIS DISCWT discharge weight. ",
+         "Finding confirms facial nerve repair is predominantly an ambulatory procedure."),
+  startRow=fn_nis, startCol=1)
+mergeCells(wb, "NIS 2023 Inpatient Results", cols=1:4, rows=fn_nis)
+addStyle(wb, "NIS 2023 Inpatient Results", note_s, rows=fn_nis, cols=1)
+setRowHeights(wb, "NIS 2023 Inpatient Results", rows=fn_nis, heights=60)
+
+# ── IPTW Sheet ────────────────────────────────────────────────────────────────
+addWorksheet(wb, "IPTW Charges Analysis")
+writeData(wb, "IPTW Charges Analysis",
+          "IPTW Analysis: Effect of Repair on Total Charges",
+          startRow=1, startCol=1)
+addStyle(wb, "IPTW Charges Analysis", title_s, rows=1, cols=1)
+writeData(wb, "IPTW Charges Analysis", iptw_excel,
+          startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "IPTW Charges Analysis", header_s, rows=3, cols=1:2,
+         gridExpand=TRUE)
+addStyle(wb, "IPTW Charges Analysis", data_s,
+         rows=4:(nrow(iptw_excel)+3), cols=1:2, gridExpand=TRUE)
+setColWidths(wb, "IPTW Charges Analysis", cols=1, widths=40)
+setColWidths(wb, "IPTW Charges Analysis", cols=2, widths=60)
+fn_iptw <- nrow(iptw_excel)+5
+writeData(wb, "IPTW Charges Analysis",
+  paste0("IPTW estimated using propensity score weighting (WeightIt, ATE estimand). ",
+         "Outcome modeled as log(total charges) via survey-weighted linear regression. ",
+         "Effect reflects percentage change in charges associated with repair after ",
+         "balancing all measured confounders. HCUP NASS 2016\u20132023."),
+  startRow=fn_iptw, startCol=1)
+mergeCells(wb, "IPTW Charges Analysis", cols=1:2, rows=fn_iptw)
+addStyle(wb, "IPTW Charges Analysis", note_s, rows=fn_iptw, cols=1)
+setRowHeights(wb, "IPTW Charges Analysis", rows=fn_iptw, heights=55)
+
+# ── Phase 1 vs Phase 2 Comparison (Excel only — internal QC) ─────────────────
+addWorksheet(wb, "Phase 1 vs Phase 2 Comparison")
+writeData(wb, "Phase 1 vs Phase 2 Comparison",
+          "Phase 1 vs Phase 2 Comparison \u2014 Internal Quality Check",
+          startRow=1, startCol=1)
+addStyle(wb, "Phase 1 vs Phase 2 Comparison", title_s, rows=1, cols=1)
+mergeCells(wb, "Phase 1 vs Phase 2 Comparison", cols=1:3, rows=1)
+writeData(wb, "Phase 1 vs Phase 2 Comparison", phase_compare,
+          startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "Phase 1 vs Phase 2 Comparison", header_s, rows=3, cols=1:3,
+         gridExpand=TRUE)
+addStyle(wb, "Phase 1 vs Phase 2 Comparison", data_s,
+         rows=4:(nrow(phase_compare)+3), cols=1:3, gridExpand=TRUE)
+addStyle(wb, "Phase 1 vs Phase 2 Comparison", bot_s,
+         rows=nrow(phase_compare)+3, cols=1:3, gridExpand=TRUE)
+setColWidths(wb, "Phase 1 vs Phase 2 Comparison", cols=1, widths=42)
+setColWidths(wb, "Phase 1 vs Phase 2 Comparison", cols=2:3, widths=38)
+fn_pc <- nrow(phase_compare)+5
+writeData(wb, "Phase 1 vs Phase 2 Comparison",
+  paste0("Investigator quality check only \u2014 does NOT appear in the Phase 2 ",
+         "manuscript. Confirms Phase 2 produces a more complete cohort and that ",
+         "the direction of significant predictors is consistent across definitions. ",
+         "Phase 2 overall repair rate is expected to be lower than 29.2%; if higher, ",
+         "review extraction logic. NOTE: HOSP_REGION not available in the 2023 NASS ",
+         "Hospital file; regional ORs reflect 2016\u20132022 data only."),
+  startRow=fn_pc, startCol=1)
+mergeCells(wb, "Phase 1 vs Phase 2 Comparison", cols=1:3, rows=fn_pc)
+addStyle(wb, "Phase 1 vs Phase 2 Comparison", note_s, rows=fn_pc, cols=1)
+setRowHeights(wb, "Phase 1 vs Phase 2 Comparison", rows=fn_pc, heights=70)
+
+# ── Sensitivity Analysis 1 ───────────────────────────────────────────────────
+addWorksheet(wb, "Sensitivity Analysis 1")
+writeData(wb, "Sensitivity Analysis 1",
+          "Sensitivity Analysis 1 \u2014 Criterion A Only",
+          startRow=1, startCol=1)
+addStyle(wb, "Sensitivity Analysis 1", title_s, rows=1, cols=1)
+mergeCells(wb, "Sensitivity Analysis 1", cols=1:2, rows=1)
+writeData(wb, "Sensitivity Analysis 1", sens1_tbl,
+          startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "Sensitivity Analysis 1", header_s, rows=3, cols=1:2,
+         gridExpand=TRUE)
+addStyle(wb, "Sensitivity Analysis 1", data_s,
+         rows=4:(nrow(sens1_tbl)+3), cols=1:2, gridExpand=TRUE)
+addStyle(wb, "Sensitivity Analysis 1", bot_s,
+         rows=nrow(sens1_tbl)+3, cols=1:2, gridExpand=TRUE)
+setColWidths(wb, "Sensitivity Analysis 1", cols=1, widths=32)
+setColWidths(wb, "Sensitivity Analysis 1", cols=2, widths=22)
+fn_s1 <- nrow(sens1_tbl)+5
+writeData(wb, "Sensitivity Analysis 1",
+  paste0("Group 1 restricted to S04.5 co-occurring with S01.* or S11.*, ",
+         "excluding the external-cause-only path AND excluding the Criterion B ",
+         "procedural pathway. HCUP NASS 2016\u20132023. Weighted estimates use DISCWT."),
+  startRow=fn_s1, startCol=1)
+mergeCells(wb, "Sensitivity Analysis 1", cols=1:2, rows=fn_s1)
+addStyle(wb, "Sensitivity Analysis 1", note_s, rows=fn_s1, cols=1)
+setRowHeights(wb, "Sensitivity Analysis 1", rows=fn_s1, heights=55)
+
+# ── Sensitivity Analysis 2 ───────────────────────────────────────────────────
+addWorksheet(wb, "Sensitivity Analysis 2")
+writeData(wb, "Sensitivity Analysis 2",
+          "Sensitivity Analysis 2 \u2014 Highest Mechanistic Specificity",
+          startRow=1, startCol=1)
+addStyle(wb, "Sensitivity Analysis 2", title_s, rows=1, cols=1)
+mergeCells(wb, "Sensitivity Analysis 2", cols=1:2, rows=1)
+writeData(wb, "Sensitivity Analysis 2", sens2_tbl,
+          startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "Sensitivity Analysis 2", header_s, rows=3, cols=1:2,
+         gridExpand=TRUE)
+addStyle(wb, "Sensitivity Analysis 2", data_s,
+         rows=4:(nrow(sens2_tbl)+3), cols=1:2, gridExpand=TRUE)
+addStyle(wb, "Sensitivity Analysis 2", bot_s,
+         rows=nrow(sens2_tbl)+3, cols=1:2, gridExpand=TRUE)
+setColWidths(wb, "Sensitivity Analysis 2", cols=1, widths=32)
+setColWidths(wb, "Sensitivity Analysis 2", cols=2, widths=22)
+fn_s2 <- nrow(sens2_tbl)+5
+writeData(wb, "Sensitivity Analysis 2",
+  paste0("Group 1 restricted to S04.5 co-occurring with S01.* or S11.* AND an ",
+         "external cause code (W25\u2013W27, W45, X99, Y28, V01\u2013V99). ",
+         "HCUP NASS 2016\u20132023. Weighted estimates use DISCWT discharge weight."),
+  startRow=fn_s2, startCol=1)
+mergeCells(wb, "Sensitivity Analysis 2", cols=1:2, rows=fn_s2)
+addStyle(wb, "Sensitivity Analysis 2", note_s, rows=fn_s2, cols=1)
+setRowHeights(wb, "Sensitivity Analysis 2", rows=fn_s2, heights=55)
+
+# ── Sensitivity Analysis 3 ───────────────────────────────────────────────────
+addWorksheet(wb, "Sensitivity Analysis 3")
+writeData(wb, "Sensitivity Analysis 3",
+          "Sensitivity Analysis 3 \u2014 Maximum Specificity",
+          startRow=1, startCol=1)
+addStyle(wb, "Sensitivity Analysis 3", title_s, rows=1, cols=1)
+mergeCells(wb, "Sensitivity Analysis 3", cols=1:2, rows=1)
+writeData(wb, "Sensitivity Analysis 3", sens3_tbl,
+          startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, "Sensitivity Analysis 3", header_s, rows=3, cols=1:2,
+         gridExpand=TRUE)
+addStyle(wb, "Sensitivity Analysis 3", data_s,
+         rows=4:(nrow(sens3_tbl)+3), cols=1:2, gridExpand=TRUE)
+addStyle(wb, "Sensitivity Analysis 3", bot_s,
+         rows=nrow(sens3_tbl)+3, cols=1:2, gridExpand=TRUE)
+setColWidths(wb, "Sensitivity Analysis 3", cols=1, widths=32)
+setColWidths(wb, "Sensitivity Analysis 3", cols=2, widths=22)
+fn_s3 <- nrow(sens3_tbl)+5
+writeData(wb, "Sensitivity Analysis 3",
+  paste0("Laterality-specified facial nerve injury (S04.51* or S04.52*) ",
+         "co-occurring with anatomically concordant facial wound (S01.1*, S01.3*, ",
+         "S01.4*, S01.5*, or S01.81*) AND external cause code (W25\u2013W27, W45, ",
+         "X99, Y28, V01\u2013V99). This is the maximum specificity definition ",
+         "feasible in ICD-10-CM administrative data. Note: external cause code ",
+         "completeness varies by institution and year; cohort size reflects ",
+         "availability of all three code types simultaneously. ",
+         "HCUP NASS 2016\u20132023. Weighted estimates use DISCWT."),
+  startRow=fn_s3, startCol=1)
+mergeCells(wb, "Sensitivity Analysis 3", cols=1:2, rows=fn_s3)
+addStyle(wb, "Sensitivity Analysis 3", note_s, rows=fn_s3, cols=1)
+setRowHeights(wb, "Sensitivity Analysis 3", rows=fn_s3, heights=80)
+
+# ── Save Excel ────────────────────────────────────────────────────────────────
+xlsx_path <- file.path(xlsx_dir, "NASS Laceration Phase 2 Output 1.1.xlsx")
+saveWorkbook(wb, file=xlsx_path, overwrite=TRUE)
+message("Excel saved: ", xlsx_path)
+```
+
+# GT Tables for Manuscript
+
+```{r gt-export}
+#| cache: false
+
+save_gt_to_word <- function(gt_tbl, filename) {
+  filepath <- file.path(word_dir, filename)
+  gt::gtsave(gt_tbl, filename=filepath)
+  message("Saved: ", filename)
+}
+
+# ── Sheet 1 gt ───────────────────────────────────────────────────────────────
+gt_sheet1 <- sheet1 %>%
+  setNames(c("Characteristic","No Repair","Repair","Total","Repair Rate")) %>%
+  mutate(across(c(`No Repair`,`Repair`,`Total`,`Repair Rate`),
+                ~ifelse(is.na(.), "", .))) %>%
+  gt() %>%
+  tab_header(title=md("**National Estimates of Patient and Hospital Characteristics by Facial Nerve Repair Status, Including Repair Rates**")) %>%
+  tab_footnote(footnote=md(paste0(
+    "HCUP NASS 2016\u20132023. Total = All patients with traumatic facial nerve ",
+    "laceration nationally. All values are weighted national estimates (DISCWT). ",
+    "Repair Rate = Weighted repair / Weighted Group 1 x 100. Age mean \u00b1 SD ",
+    "estimated using age group midpoints. NOTE: HOSP_REGION not available in 2023 ",
+    "NASS Hospital file; regional estimates reflect 2016\u20132022 only."))) %>%
+  tab_style(style=cell_text(weight="bold"),
+            locations=cells_column_labels()) %>%
+  tab_style(
+    style=cell_text(weight="bold"),
+    locations=cells_body(
+      rows=(`No Repair`=="" & !str_starts(Characteristic,"   ")) |
+            Characteristic=="Total cases" |
+            Characteristic=="Age, mean \u00b1 SD"
+    )
+  ) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  cols_label(Characteristic="Characteristic",
+             `No Repair`="No Repair (n, %)",
+             Repair="Repair (n, %)",
+             Total="Total (n)",
+             `Repair Rate`="Repair Rate (%)") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── Sheet 2 gt ───────────────────────────────────────────────────────────────
+gt_sheet2 <- sheet2 %>%
+  setNames(c("Characteristic","Adjusted OR","p value")) %>%
+  gt() %>%
+  tab_header(title=md("**Multivariable Logistic Regression for Odds of Facial Nerve Repair**")) %>%
+  tab_footnote(footnote=md(paste0(
+    "Survey-weighted multivariable logistic regression (svyglm, quasibinomial). ",
+    "HCUP NASS 2016\u20132023. Reference: Male, Age 18\u201334, White, ",
+    "76th\u2013100th income quartile, Private insurance, South, Urban, Nonteaching. ",
+    "OR = odds ratio; CI = 95% confidence interval. Significant predictors (p<0.05): ",
+    sig_pred_text, "."))) %>%
+  tab_style(style=cell_text(weight="bold"),
+            locations=cells_body(
+              rows=is.na(`Adjusted OR`) | `Adjusted OR`=="" )) %>%
+  tab_style(style=cell_text(color="grey", style="italic"),
+            locations=cells_body(
+              rows=!is.na(`Adjusted OR`) & `Adjusted OR`=="Reference")) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  cols_label(Characteristic="Characteristic",
+             `Adjusted OR`="Adjusted OR (95% CI)",
+             `p value`="p value") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── Sheet 4 gt ───────────────────────────────────────────────────────────────
+gt_sheet4 <- sheet4 %>%
+  setNames(c("Year","Injury Unweighted N","Injury Weighted N",
+             "Repair Unweighted N","Repair Weighted N","Repair Rate (%)")) %>%
+  gt() %>%
+  tab_header(title=md("**Repair Rates by Year**")) %>%
+  tab_footnote(footnote=md(paste0("HCUP NASS 2016\u20132023. Weighted estimates use DISCWT discharge weight. ",
+       "Repair rate = Weighted repair / Weighted total injury x 100. ",
+       "Chi-square test for difference in repair rates across years: p = ", year_p, "."))) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  fmt_number(columns=c(`Injury Weighted N`,`Repair Weighted N`),
+             decimals=0, use_seps=TRUE) %>%
+  cols_label(`Injury Unweighted N`="Traumatic facial nerve laceration (unweighted N)",
+             `Injury Weighted N`  ="Traumatic facial nerve laceration (weighted N)",
+             `Repair Unweighted N`="Repair (unweighted N)",
+             `Repair Weighted N`  ="Repair (weighted N)",
+             `Repair Rate (%)`    ="Repair rate \u2014 weighted (%)") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── Sheet 5 gt ───────────────────────────────────────────────────────────────
+gt_sheet5 <- sheet5 %>%
+  setNames(c("Characteristic","No Repair Median","Repair Median",
+             "p value No Repair","p value Repair")) %>%
+  gt() %>%
+  tab_header(title=md("**Charge Analysis: Repair vs No Repair**")) %>%
+  tab_footnote(footnote=md(paste0(
+    "Median (IQR) weighted national estimates. HCUP NASS 2016\u20132023. ",
+    "Insurance type p-values: survey-weighted ANOVA on log-charges within ",
+    "no-repair group and within repair group separately. Teaching status p-values: ",
+    "survey-weighted t-test comparing Nonteaching vs Teaching within each group."))) %>%
+  tab_style(style=cell_text(weight="bold"),
+            locations=cells_body(
+              rows=is.na(`No Repair Median`) &
+                   !str_starts(Characteristic,"   "))) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  cols_label(Characteristic     ="Characteristic",
+             `No Repair Median` ="No Repair Median (IQR)",
+             `Repair Median`    ="Repair Median (IQR)",
+             `p value No Repair`="p value (no repair: within-group)",
+             `p value Repair`   ="p value (repair: within-group)") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── NIS 2023 gt ──────────────────────────────────────────────────────────────
+gt_nis <- nis_sheet %>%
+  setNames(c("ICD-10-PCS Code","Description","Unweighted N","Weighted N")) %>%
+  gt() %>%
+  tab_header(
+    title=md("**NIS 2023 Facial Nerve Repair \u2014 Inpatient Database Results**"),
+    subtitle=md("*HCUP National Inpatient Sample, 2023*")) %>%
+  tab_footnote(footnote=md(paste0(
+    "ICD-10-PCS codes searched in PNS section (01QM0/3/4ZZ) and CNS section ",
+    "(00QM0/3/4ZZ). Individual PNS code breakdown suppressed per HCUP cell size ",
+    "restrictions (<11 per cell). Weighted estimate uses NIS DISCWT. Finding ",
+    "confirms facial nerve repair is predominantly ambulatory; NASS is the ",
+    "appropriate primary database."))) %>%
+  tab_style(style=list(cell_text(color="grey", style="italic")),
+            locations=cells_body(rows=1:3)) %>%
+  tab_style(style=list(cell_text(weight="bold"),
+                       cell_fill(color="#EBF4FB")),
+            locations=cells_body(rows=7)) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  sub_missing(missing_text="\u2014") %>%
+  cols_label(`ICD-10-PCS Code`="ICD-10-PCS Code",
+             Description="Description",
+             `Unweighted N`="Unweighted N",
+             `Weighted N`="Weighted N (national estimate)") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── Sensitivity Analysis 1 gt ────────────────────────────────────────────────
+gt_sens1 <- sens1_tbl %>%
+  setNames(c("Metric","Value")) %>%
+  gt() %>%
+  tab_header(title=md("**Sensitivity Analysis 1 \u2014 Criterion A Only**")) %>%
+  tab_footnote(footnote=md(paste0(
+    "Group 1 restricted to S04.5 co-occurring with S01.* or S11.*, excluding ",
+    "external-cause-only entries and excluding the Criterion B procedural ",
+    "pathway. HCUP NASS 2016\u20132023. Weighted estimates use DISCWT."))) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  cols_label(Metric="Metric", Value="Value") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── Sensitivity Analysis 2 gt ────────────────────────────────────────────────
+gt_sens2 <- sens2_tbl %>%
+  setNames(c("Metric","Value")) %>%
+  gt() %>%
+  tab_header(title=md("**Sensitivity Analysis 2 \u2014 Highest Mechanistic Specificity**")) %>%
+  tab_footnote(footnote=md(paste0(
+    "Group 1 restricted to S04.5 co-occurring with S01.* or S11.* AND an ",
+    "external cause code (W25\u2013W27, W45, X99, Y28, V01\u2013V99). ",
+    "HCUP NASS 2016\u20132023. Weighted estimates use DISCWT."))) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  cols_label(Metric="Metric", Value="Value") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── Sensitivity Analysis 3 gt ────────────────────────────────────────────────
+gt_sens3 <- sens3_tbl %>%
+  setNames(c("Metric","Value")) %>%
+  gt() %>%
+  tab_header(title=md("**Sensitivity Analysis 3 \u2014 Maximum Specificity**"),
+             subtitle=md("*Laterality-specified nerve + anatomic wound + external cause*")) %>%
+  tab_footnote(footnote=md(paste0(
+    "Laterality-specified facial nerve injury (S04.51* or S04.52*) co-occurring ",
+    "with anatomically concordant wound (S01.1*, S01.3*, S01.4*, S01.5*, S01.81*) ",
+    "AND external cause code (W25\u2013W27, W45, X99, Y28, V01\u2013V99). ",
+    "Group 2 = Group 1 + CPT 64864 or 64865. ",
+    "External cause code completeness varies by institution and year. ",
+    "HCUP NASS 2016\u20132023. Weighted estimates use DISCWT."))) %>%
+  tab_style(style=cell_fill(color="#EBF4FB"),
+            locations=cells_column_labels()) %>%
+  cols_label(Metric="Metric", Value="Value") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(table.font.size=11, heading.title.font.size=12,
+              column_labels.font.weight="bold",
+              table.border.top.style="solid",
+              table.border.bottom.style="solid")
+
+# ── Save all Word tables ──────────────────────────────────────────────────────
+save_gt_to_word(gt_sheet1, "Table1_Patient_Characteristics.docx")
+save_gt_to_word(gt_sheet2, "Table2_Logistic_Regression.docx")
+save_gt_to_word(gt_sheet4, "Table4_Repair_Rates_by_Year.docx")
+save_gt_to_word(gt_sheet5, "Table5_Charges_Analysis.docx")
+save_gt_to_word(gt_nis,    "Table_NIS2023_Inpatient_Results.docx")
+save_gt_to_word(gt_sens1,  "Table_Sensitivity_Analysis_1.docx")
+save_gt_to_word(gt_sens2,  "Table_Sensitivity_Analysis_2.docx")
+save_gt_to_word(gt_sens3,  "Table_Sensitivity_Analysis_3.docx")
+
+message("\nAll Word tables saved to: ", word_dir)
+```
+
+# Draft Methods Paragraph
+
+```{r draft-methods}
+#| cache: false
+g1_unw_fmt   <- format(nrow(enc_all),                  big.mark=",")
+g1_w_fmt     <- format(round(total_g1_w),              big.mark=",")
+g2_w_fmt     <- format(round(total_repair_w),          big.mark=",")
+g3_w_fmt     <- format(round(total_norepair_w),        big.mark=",")
+rate_pct     <- round(100*total_repair_w/total_g1_w,   1)
+norate_pct   <- round(100*total_norepair_w/total_g1_w, 1)
+
+draft_methods <- paste0(
+  "We analyzed the HCUP National Ambulatory Surgery Sample (NASS) for 2016 ",
+  "through 2023. A total of ", g1_w_fmt, " encounters with traumatic facial ",
+  "nerve laceration were identified nationally (unweighted N = ", g1_unw_fmt,
+  "), of whom ", g2_w_fmt, " (", rate_pct, "%) underwent surgical repair ",
+  "(CPT 64864 or 64865). ", g3_w_fmt, " patients (", norate_pct,
+  "%) were managed without operative repair."
+)
+
+cat(draft_methods)
+```
+
+# Copy Outputs to OneDrive
+
+```{r copy-to-drive}
+#| cache: false
+# Copy the rendered HTML and the .qmd source into the Quarto Versions subfolder.
+qmd_basename  <- "nass_phase2_analysis_1_1.qmd"
+html_basename <- "nass_phase2_analysis_1_1.html"
+
+# HTML: search common locations for the rendered output
+html_candidates <- c(
+  file.path(getwd(),     html_basename),
+  file.path("~/Downloads", html_basename),
+  file.path("~/Documents", html_basename)
+)
+html_src <- html_candidates[file.exists(path.expand(html_candidates))][1]
+if (!is.na(html_src)) {
+  file.copy(path.expand(html_src),
+            file.path(qmd_dir, html_basename),
+            overwrite=TRUE)
+  message("HTML copied from: ", html_src)
+} else {
+  message("HTML not yet available; render the document and re-run this chunk.")
+}
+
+# QMD source: copy from the working directory if present
+qmd_src <- file.path(getwd(), qmd_basename)
+if (file.exists(qmd_src)) {
+  file.copy(qmd_src,
+            file.path(qmd_dir, qmd_basename),
+            overwrite=TRUE)
+  message("QMD copied from: ", qmd_src)
+}
+
+message("\nAll outputs saved under: ", output_dir)
+message("  Figures      : ", fig_dir)
+message("  Excel        : ", xlsx_dir)
+message("  Word Tables  : ", word_dir)
+message("  Quarto       : ", qmd_dir)
+```
+
+# Session Info
+
+```{r session}
+sessionInfo()
+```
