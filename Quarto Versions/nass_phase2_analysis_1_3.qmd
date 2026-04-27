@@ -1964,11 +1964,14 @@ writeData(wb, "Co-occurrence (Exploratory)", cpt_cooccur,
           startRow=cpt_start+1, startCol=1, colNames=TRUE)
 addStyle(wb, "Co-occurrence (Exploratory)", header_s,
          rows=cpt_start+1, cols=1:5, gridExpand=TRUE)
-addStyle(wb, "Co-occurrence (Exploratory)", data_s,
-         rows=(cpt_start+2):(cpt_start+1+nrow(cpt_cooccur)), cols=1)
-addStyle(wb, "Co-occurrence (Exploratory)", center_s,
-         rows=(cpt_start+2):(cpt_start+1+nrow(cpt_cooccur)), cols=2:5,
-         gridExpand=TRUE)
+if (nrow(cpt_cooccur) > 0) {
+  addStyle(wb, "Co-occurrence (Exploratory)", data_s,
+           rows=(cpt_start+2):(cpt_start+1+nrow(cpt_cooccur)), cols=1,
+           gridExpand=TRUE)
+  addStyle(wb, "Co-occurrence (Exploratory)", center_s,
+           rows=(cpt_start+2):(cpt_start+1+nrow(cpt_cooccur)), cols=2:5,
+           gridExpand=TRUE)
+}
 
 # Section C: S04.5 subcode breakdown
 s045_start <- cpt_start + nrow(cpt_cooccur) + 4
@@ -1980,11 +1983,14 @@ writeData(wb, "Co-occurrence (Exploratory)", s045_long,
           startRow=s045_start+1, startCol=1, colNames=TRUE)
 addStyle(wb, "Co-occurrence (Exploratory)", header_s,
          rows=s045_start+1, cols=1:4, gridExpand=TRUE)
-addStyle(wb, "Co-occurrence (Exploratory)", data_s,
-         rows=(s045_start+2):(s045_start+1+nrow(s045_long)), cols=1)
-addStyle(wb, "Co-occurrence (Exploratory)", center_s,
-         rows=(s045_start+2):(s045_start+1+nrow(s045_long)), cols=2:4,
-         gridExpand=TRUE)
+if (nrow(s045_long) > 0) {
+  addStyle(wb, "Co-occurrence (Exploratory)", data_s,
+           rows=(s045_start+2):(s045_start+1+nrow(s045_long)), cols=1,
+           gridExpand=TRUE)
+  addStyle(wb, "Co-occurrence (Exploratory)", center_s,
+           rows=(s045_start+2):(s045_start+1+nrow(s045_long)), cols=2:4,
+           gridExpand=TRUE)
+}
 
 # Section D: Open wound subcode breakdown
 wound_start <- s045_start + nrow(s045_long) + 4
@@ -1996,11 +2002,14 @@ writeData(wb, "Co-occurrence (Exploratory)", wound_long,
           startRow=wound_start+1, startCol=1, colNames=TRUE)
 addStyle(wb, "Co-occurrence (Exploratory)", header_s,
          rows=wound_start+1, cols=1:5, gridExpand=TRUE)
-addStyle(wb, "Co-occurrence (Exploratory)", data_s,
-         rows=(wound_start+2):(wound_start+1+nrow(wound_long)), cols=1:2)
-addStyle(wb, "Co-occurrence (Exploratory)", center_s,
-         rows=(wound_start+2):(wound_start+1+nrow(wound_long)), cols=3:5,
-         gridExpand=TRUE)
+if (nrow(wound_long) > 0) {
+  addStyle(wb, "Co-occurrence (Exploratory)", data_s,
+           rows=(wound_start+2):(wound_start+1+nrow(wound_long)), cols=1:2,
+           gridExpand=TRUE)
+  addStyle(wb, "Co-occurrence (Exploratory)", center_s,
+           rows=(wound_start+2):(wound_start+1+nrow(wound_long)), cols=3:5,
+           gridExpand=TRUE)
+}
 
 fn_co <- wound_start + nrow(wound_long) + 3
 writeData(wb, "Co-occurrence (Exploratory)",
