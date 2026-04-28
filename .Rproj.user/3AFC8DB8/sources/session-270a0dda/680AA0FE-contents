@@ -1,0 +1,630 @@
+---
+title: "NIS 2023 Facial Nerve Repair, Supplement & Reposition Query"
+author: "Solomon Johnson"
+date: "`r Sys.Date()`"
+output-file: "nis_facial_nerve_supplement_query_v1.0.html"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: true
+  freeze: auto
+---
+
+# Purpose
+
+Query HCUP NIS 2023 (National Inpatient Sample) for ICD-10-PCS facial nerve
+codes beyond the Repair (01QM) family, to determine whether inpatient facial
+nerve reconstruction is captured under Supplement (01UM) or Reposition (01SM)
+codes. Prior 01QM query returned 3 unweighted (15 weighted) cases — this run
+determines whether the inpatient arm of the parallel NASS/NIS study is viable
+or should be reframed as a brief descriptive comparator.
+
+**Source file:** `NIS_2023_Core.ASC` — fixed-width ASCII, 643 bytes per record.
+Column positions derived from `StataLoad_NIS_2023_Core.Do` (HCUP, 12/10/2025).
+Only the columns needed for this query are read; all others are skipped,
+keeping memory well below the 4.34 GB file size.
+
+**Codes queried:**
+
+- `01QM0ZZ / 01QM3ZZ / 01QM4ZZ` — Repair Facial Nerve, PNS (QC vs. prior run)
+- `01UM07Z / 01UM0KZ / 01UM0JZ` — Supplement Facial Nerve, Open
+- `01SM0ZZ` — Reposition Facial Nerve, Open
+- `00QM0ZZ / 00QM3ZZ / 00QM4ZZ` — CNS-section codes (negative control, expect 0)
+
+```{r setup}
+#| cache: false
+pkgs <- c("readr","dplyr","purrr","tidyr","stringr","survey",
+          "openxlsx","knitr","kableExtra","gt")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+
+library(readr);     library(dplyr);     library(purrr);    library(tidyr)
+library(stringr);   library(survey);    library(openxlsx); library(knitr)
+library(kableExtra);library(gt)
+
+output_dir <- "~/Desktop/NIS Facial Nerve Query Output 1.0"
+dir.create(path.expand(output_dir), showWarnings = FALSE)
+```
+
+# Configuration
+
+```{r config}
+# ── File path ─────────────────────────────────────────────────────────────────
+nis_core_asc <- paste0(
+  "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/",
+  "NASS traumatic facial nerve repair project/Data/",
+  "HCUP Original Data Files 21 through 23/HCUP NIS/NIS_2023/",
+  "NIS_2023_Core.ASC"
+)
+
+# ── Column positions (bytes) from StataLoad_NIS_2023_Core.Do (12/10/2025) ────
+#
+#   Variable      Cols      Type    Notes
+#   HOSP_NIS      1–5       long    Hospital ID; cluster variable for svydesign
+#   NIS_STRATUM   16–19     int     Sampling stratum
+#   DISCWT        31–41     double  Raw integer stored with 7 implied decimals
+#   I10_PR1       355–361   str     7-character ICD-10-PCS code
+#   I10_PR2       362–368
+#   ...
+#   I10_PR25      523–529
+
+col_spec <- fwf_cols(
+  HOSP_NIS    = c(1,   5),
+  NIS_STRATUM = c(16,  19),
+  DISCWT      = c(31,  41),
+  I10_PR1     = c(355, 361),
+  I10_PR2     = c(362, 368),
+  I10_PR3     = c(369, 375),
+  I10_PR4     = c(376, 382),
+  I10_PR5     = c(383, 389),
+  I10_PR6     = c(390, 396),
+  I10_PR7     = c(397, 403),
+  I10_PR8     = c(404, 410),
+  I10_PR9     = c(411, 417),
+  I10_PR10    = c(418, 424),
+  I10_PR11    = c(425, 431),
+  I10_PR12    = c(432, 438),
+  I10_PR13    = c(439, 445),
+  I10_PR14    = c(446, 452),
+  I10_PR15    = c(453, 459),
+  I10_PR16    = c(460, 466),
+  I10_PR17    = c(467, 473),
+  I10_PR18    = c(474, 480),
+  I10_PR19    = c(481, 487),
+  I10_PR20    = c(488, 494),
+  I10_PR21    = c(495, 501),
+  I10_PR22    = c(502, 508),
+  I10_PR23    = c(509, 515),
+  I10_PR24    = c(516, 522),
+  I10_PR25    = c(523, 529)
+)
+
+# DISCWT: stored as a raw integer with 7 implied decimal places in the ASC.
+# e.g. the value 52631579 in the file represents a weight of 5.2631579.
+# Sentinel values from Stata do-file: -999999999/-888888888/-666666666 → NA.
+DISCWT_SCALE <- 1e7
+DISCWT_NA    <- c(-999999999, -888888888, -666666666)
+
+# Other HCUP missing-value sentinels (from Stata recode section)
+HOSP_NIS_NA  <- c(-9999, -8888, -6666)
+STRATUM_NA   <- c(-999,  -888,  -666)
+
+# ICD-10-PCS target code lists
+pcs_repair_pns     <- c("01QM0ZZ","01QM3ZZ","01QM4ZZ")
+pcs_supplement     <- c("01UM07Z","01UM0KZ","01UM0JZ")
+pcs_reposition     <- c("01SM0ZZ")
+pcs_repair_cns_neg <- c("00QM0ZZ","00QM3ZZ","00QM4ZZ")
+all_codes          <- c(pcs_repair_pns, pcs_supplement,
+                        pcs_reposition, pcs_repair_cns_neg)
+
+hcup_suppress_threshold <- 11L
+```
+
+# Data Extraction
+
+```{r extract}
+#| cache: true
+stopifnot(file.exists(nis_core_asc))
+
+message("Reading NIS_2023_Core.ASC (4.34 GB — selected columns only)...")
+message("Estimated time on typical SSD: 3–8 minutes.")
+
+core <- read_fwf(
+  file          = nis_core_asc,
+  col_positions = col_spec,
+  col_types     = cols(
+    HOSP_NIS    = col_integer(),
+    NIS_STRATUM = col_integer(),
+    DISCWT      = col_double(),
+    .default    = col_character()   # all I10_PR fields
+  ),
+  na = c("", " ")
+)
+
+message("Rows loaded: ", format(nrow(core), big.mark=","))
+
+# ── Apply HCUP missing-value recoding ────────────────────────────────────────
+core <- core %>%
+  mutate(
+    HOSP_NIS    = if_else(HOSP_NIS    %in% HOSP_NIS_NA, NA_integer_, HOSP_NIS),
+    NIS_STRATUM = if_else(NIS_STRATUM %in% STRATUM_NA,  NA_integer_, NIS_STRATUM),
+    DISCWT      = if_else(DISCWT      %in% DISCWT_NA,   NA_real_,
+                          DISCWT / DISCWT_SCALE)
+  )
+
+# Trim whitespace padding from all procedure code fields
+pr_cols <- grep("^I10_PR[0-9]+$", names(core), value=TRUE)
+core    <- core %>% mutate(across(all_of(pr_cols), trimws))
+
+message("Procedure fields: ", length(pr_cols))
+message("Discharges with valid DISCWT: ",
+        format(sum(!is.na(core$DISCWT)), big.mark=","))
+```
+
+# Code Flagging
+
+```{r flag-codes}
+#| cache: true
+flag_code <- function(df, code, pr_cols) {
+  as.integer(rowSums(
+    sapply(pr_cols, function(col)
+      !is.na(df[[col]]) & df[[col]] == code,
+      USE.NAMES = FALSE),
+    na.rm = TRUE
+  ) > 0)
+}
+
+flag_any <- function(df, codes, pr_cols) {
+  if (length(codes) == 0L) return(rep(0L, nrow(df)))
+  as.integer(rowSums(
+    sapply(codes, function(cd) flag_code(df, cd, pr_cols),
+           USE.NAMES = FALSE)
+  ) > 0)
+}
+
+for (cd in all_codes) {
+  core[[paste0("flag_", cd)]] <- flag_code(core, cd, pr_cols)
+}
+
+core$any_repair_pns     <- flag_any(core, pcs_repair_pns,     pr_cols)
+core$any_supplement     <- flag_any(core, pcs_supplement,     pr_cols)
+core$any_reposition     <- flag_any(core, pcs_reposition,     pr_cols)
+core$any_repair_cns_neg <- flag_any(core, pcs_repair_cns_neg, pr_cols)
+# Union includes CNS-miscoded cases (00QM) so the total reflects all
+# inpatient discharges with any facial nerve repair attempt, correctly
+# or incorrectly coded. Correct PNS cases and miscoded CNS cases are
+# reported separately in the frequency table.
+core$any_facial_nerve   <- as.integer(
+  (core$any_repair_pns + core$any_supplement +
+   core$any_reposition + core$any_repair_cns_neg) > 0
+)
+
+message("── Unweighted counts ──────────────────────────────────────")
+message("  Any facial nerve (union):  ", sum(core$any_facial_nerve))
+message("  01QM Repair (PNS):         ", sum(core$any_repair_pns))
+message("  01UM Supplement:           ", sum(core$any_supplement))
+message("  01SM Reposition:           ", sum(core$any_reposition))
+message("  00QM CNS neg control:      ", sum(core$any_repair_cns_neg))
+```
+
+# Survey Design
+
+```{r survey-design}
+# HCUP NIS: stratify on NIS_STRATUM, cluster on HOSP_NIS, weight by DISCWT.
+# nest=TRUE because HOSP_NIS values repeat across strata (not globally unique).
+# lonely.psu="adjust" prevents errors when rare-code subsets reduce a stratum
+# to a single PSU.
+options(survey.lonely.psu = "adjust")
+
+svy_nis <- svydesign(
+  ids     = ~HOSP_NIS,
+  strata  = ~NIS_STRATUM,
+  weights = ~DISCWT,
+  data    = core,
+  nest    = TRUE
+)
+```
+
+# Frequency Table
+
+```{r frequencies}
+#| cache: false
+summarise_code <- function(code) {
+  flag_var <- paste0("flag_", code)
+  unwt_n   <- sum(core[[flag_var]], na.rm=TRUE)
+  wt_est   <- if (unwt_n > 0L)
+    as.numeric(svytotal(as.formula(paste0("~", flag_var)),
+                        svy_nis, na.rm=TRUE)[1])
+  else 0
+  # round to 1 decimal — integer rounding truncates fractional weighted Ns to 0
+  tibble(pcs_code=code, unweighted_n=unwt_n, weighted_n=round(wt_est, 1))
+}
+
+summarise_rollup <- function(label, flag_var) {
+  unwt_n <- sum(core[[flag_var]], na.rm=TRUE)
+  wt_est <- if (unwt_n > 0L)
+    as.numeric(svytotal(as.formula(paste0("~", flag_var)),
+                        svy_nis, na.rm=TRUE)[1])
+  else 0
+  tibble(pcs_code=label, unweighted_n=unwt_n, weighted_n=round(wt_est, 1))
+}
+
+per_code <- map_dfr(all_codes, summarise_code)
+
+rollups <- bind_rows(
+  summarise_rollup("ROLLUP: Any 01QM (Repair, PNS)",      "any_repair_pns"),
+  summarise_rollup("ROLLUP: Any 01UM (Supplement, Open)", "any_supplement"),
+  summarise_rollup("ROLLUP: Any 01SM (Reposition, Open)", "any_reposition"),
+  summarise_rollup("ROLLUP: Any 00QM (CNS neg ctrl)",     "any_repair_cns_neg"),
+  summarise_rollup("ROLLUP: Any facial nerve (union)",    "any_facial_nerve")
+)
+
+desc_lookup <- c(
+  "01QM0ZZ" = "Repair Facial Nerve, Open (PNS \u2014 correct section)",
+  "01QM3ZZ" = "Repair Facial Nerve, Percutaneous (PNS \u2014 correct section)",
+  "01QM4ZZ" = "Repair Facial Nerve, Percutaneous Endoscopic (PNS \u2014 correct section)",
+  "01UM07Z" = "Supplement Facial Nerve, Open, Autologous Tissue Substitute",
+  "01UM0KZ" = "Supplement Facial Nerve, Open, Nonautologous Tissue Substitute",
+  "01UM0JZ" = "Supplement Facial Nerve, Open, Synthetic Substitute",
+  "01SM0ZZ" = "Reposition Facial Nerve, Open",
+  "00QM0ZZ" = "Repair Facial Nerve, Open (CNS \u2014 negative control, expect 0)",
+  "00QM3ZZ" = "Repair Facial Nerve, Percutaneous (CNS \u2014 negative control)",
+  "00QM4ZZ" = "Repair Facial Nerve, Percutaneous Endoscopic (CNS \u2014 negative control)"
+)
+
+per_code <- per_code %>%
+  mutate(description = desc_lookup[pcs_code]) %>%
+  select(pcs_code, description, unweighted_n, weighted_n)
+
+rollups <- rollups %>%
+  mutate(description = "") %>%
+  select(pcs_code, description, unweighted_n, weighted_n)
+
+freq_table <- bind_rows(per_code, rollups)
+```
+
+# Apply HCUP Cell Suppression
+
+```{r suppress}
+#| cache: false
+# HCUP DUA: unweighted N 1–10 must be suppressed in published output.
+# freq_table (unsuppressed) is for analyst decision-making only.
+
+freq_pub <- freq_table %>%
+  mutate(
+    unweighted_n_disp = case_when(
+      unweighted_n == 0L                     ~ "0",
+      unweighted_n < hcup_suppress_threshold ~ "<11 (suppressed)",
+      TRUE ~ format(unweighted_n, big.mark=",")
+    ),
+    weighted_n_disp = case_when(
+      unweighted_n == 0L                     ~ "0",
+      unweighted_n < hcup_suppress_threshold ~ "Suppressed",
+      TRUE ~ format(weighted_n, big.mark=",")
+    )
+  ) %>%
+  select(pcs_code, description, unweighted_n_disp, weighted_n_disp)
+```
+
+# Internal Results — Analyst View Only (Do Not Export)
+
+```{r internal-display}
+#| cache: false
+freq_table %>%
+  kable(
+    caption   = paste0("INTERNAL ONLY \u2014 Unsuppressed counts. ",
+                       "HCUP NIS 2023. Do not include in any shared output."),
+    col.names = c("ICD-10-PCS Code","Description",
+                  "Unweighted N","Weighted N"),
+    format.args = list(big.mark=",")
+  ) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=TRUE) %>%
+  row_spec(grep("^ROLLUP", freq_table$pcs_code),
+           bold=TRUE, background="#FFF3CD") %>%
+  row_spec(grep("^00QM", freq_table$pcs_code),
+           color="grey", italic=TRUE)
+```
+
+# Decision Logic
+
+```{r decision}
+#| cache: false
+total_pns_unwt   <- freq_table %>%
+  filter(pcs_code == "ROLLUP: Any 01QM (Repair, PNS)") %>%
+  pull(unweighted_n)
+
+total_cns_unwt   <- freq_table %>%
+  filter(pcs_code == "ROLLUP: Any 00QM (CNS neg ctrl)") %>%
+  pull(unweighted_n)
+
+total_any_unwt   <- freq_table %>%
+  filter(pcs_code == "ROLLUP: Any facial nerve (union)") %>%
+  pull(unweighted_n)
+
+total_any_wt     <- freq_table %>%
+  filter(pcs_code == "ROLLUP: Any facial nerve (union)") %>%
+  pull(weighted_n)
+
+pct_miscoded <- round(100 * total_cns_unwt / total_any_unwt, 1)
+
+decision <- case_when(
+  total_any_unwt >= 200 ~
+    "VIABLE: Inpatient capture supports a parallel cohort. Proceed with co-occurring procedure profiling on the NIS arm.",
+  total_any_unwt >= 50  ~
+    "MARGINAL: Inpatient capture supports limited descriptive analysis but co-occurring procedure profiling will be underpowered. Consider pooling additional NIS years.",
+  TRUE ~
+    "REFRAME: Total too low for parallel cohort. Recommend reframing NIS arm as a brief descriptive comparator and treating NASS as the primary database."
+)
+
+cat(sprintf(paste0(
+  "── Inpatient facial nerve summary ─────────────────────────────\n",
+  "  Correctly coded PNS (01QM) — unweighted:   %d\n",
+  "  Miscoded CNS (00QM) — unweighted:          %d  (%.1f%% of total)\n",
+  "  Total (union, all sections) — unweighted:  %d\n",
+  "  Total (union, all sections) — weighted:    %.1f\n\n",
+  "DECISION: %s\n"),
+  total_pns_unwt, total_cns_unwt, pct_miscoded,
+  total_any_unwt, total_any_wt, decision))
+```
+
+# Methods Paragraph Language
+
+```{r methods-text}
+#| cache: false
+#| echo: false
+# Prints suggested methods/results language for manuscript.
+# Edit as needed before inserting into the paper.
+
+cat(paste0(
+  "── Suggested methods/results text ─────────────────────────────\n\n",
+
+  "METHODS (Data Sources, NIS paragraph):\n",
+  "The HCUP National Inpatient Sample (NIS) 2023 was queried as a secondary ",
+  "database to characterise inpatient facial nerve repair encounters and to ",
+  "assess the proportion of procedures captured in the inpatient versus ",
+  "ambulatory setting. ICD-10-PCS codes for facial nerve repair were searched ",
+  "across all procedure fields (I10_PR1 through I10_PR25) in both the correct ",
+  "Peripheral Nervous System section (01QM0ZZ, 01QM3ZZ, 01QM4ZZ) and the ",
+  "Central Nervous System section (00QM0ZZ, 00QM3ZZ, 00QM4ZZ), the latter ",
+  "serving as a coding-error detection query. National estimates were ",
+  "calculated using NIS discharge weights (DISCWT) with NIS_STRATUM ",
+  "stratification and HOSP_NIS clustering per HCUP analytic guidance.\n\n",
+
+  "RESULTS (NIS paragraph):\n",
+  sprintf(paste0(
+    "The NIS 2023 identified %d unweighted inpatient discharges with a facial ",
+    "nerve repair code across any procedure field (weighted national estimate ",
+    "%.1f). Of these, %d (%.1f%%) were miscoded to the Central Nervous System ",
+    "ICD-10-PCS section (00QM) rather than the correct Peripheral Nervous ",
+    "System section (01QM), representing a systematic ICD-10-PCS coding error. ",
+    "Only %d discharges were correctly coded to the PNS section. No encounters ",
+    "were identified with Supplement (01UM) or Reposition (01SM) codes, ",
+    "indicating that facial nerve grafting and transposition are not captured ",
+    "in NIS under alternative procedure classifications. The inpatient volume ",
+    "was insufficient for co-occurring procedure analysis; NASS was therefore ",
+    "designated the primary database. The 00QM miscoding pattern, identified ",
+    "in %.1f%% of inpatient facial nerve repair encounters, represents a ",
+    "clinically significant administrative coding error that would cause these ",
+    "cases to be missed by researchers querying only the PNS section."
+  ), total_any_unwt, total_any_wt, total_cns_unwt, pct_miscoded,
+     total_pns_unwt, pct_miscoded),
+  "\n\n",
+
+  "LIMITATIONS bullet (for discussion):\n",
+  "The NIS captures inpatient discharges only; the near-absence of facial ",
+  "nerve repair codes in the inpatient setting reflects the ambulatory nature ",
+  "of most facial nerve repair procedures rather than true rarity. ",
+  "Additionally, the majority of identifiable inpatient cases were affected ",
+  "by systematic miscoding to the CNS ICD-10-PCS section, a finding that ",
+  "has implications for future administrative database research in this area.\n"
+))
+```
+
+# Publication Table (Suppressed)
+
+```{r pub-table}
+#| cache: false
+gt_nis_supp <- freq_pub %>%
+  setNames(c("ICD-10-PCS Code","Description",
+             "Unweighted N","Weighted N (national estimate)")) %>%
+  gt() %>%
+  tab_header(
+    title    = md("**NIS 2023: Facial Nerve Repair, Supplement & Reposition**"),
+    subtitle = md("*HCUP National Inpatient Sample, 2023*")
+  ) %>%
+  tab_footnote(footnote = md(paste0(
+    "Source: HCUP NIS 2023 Core File (NIS_2023_Core.ASC). ",
+    "Column positions from StataLoad_NIS_2023_Core.Do (HCUP, 12/10/2025): ",
+    "HOSP_NIS cols\u00a01\u20135, NIS_STRATUM cols\u00a016\u201319, ",
+    "DISCWT cols\u00a031\u201341 (raw integer \u00f7 10\u2077), ",
+    "I10_PR1\u2013I10_PR25 cols\u00a0355\u2013529. ",
+    "PNS section (01) codes are correct for facial nerve; ",
+    "CNS section (00) codes (italicised) represent a systematic miscoding error ",
+    "identified in this query \u2014 coders used the CNS body-system section for ",
+    "a peripheral nerve, causing these cases to be missed by standard queries. ",
+    "Cells with unweighted N\u00a0<\u00a011 suppressed per HCUP DUA. ",
+    "Survey design: NIS_STRATUM strata, HOSP_NIS cluster, DISCWT weight. ",
+    "Weighted N displayed to one decimal place; values <1 indicate encounters ",
+    "with low sampling probability (rare strata)."
+  ))) %>%
+  tab_style(
+    style     = list(cell_text(color="grey", style="italic")),
+    locations = cells_body(rows=grepl("^00QM", freq_pub$pcs_code))
+  ) %>%
+  tab_style(
+    style     = list(cell_text(weight="bold"), cell_fill(color="#EBF4FB")),
+    locations = cells_body(rows=grepl("^ROLLUP", freq_pub$pcs_code))
+  ) %>%
+  tab_style(
+    style     = cell_fill(color="#EBF4FB"),
+    locations = cells_column_labels()
+  ) %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(
+    table.font.size           = 11,
+    heading.title.font.size   = 12,
+    column_labels.font.weight = "bold",
+    table.border.top.style    = "solid",
+    table.border.bottom.style = "solid"
+  )
+
+gt_nis_supp
+```
+
+# Export Outputs
+
+```{r export}
+#| cache: false
+
+# ── Excel ─────────────────────────────────────────────────────────────────────
+wb       <- createWorkbook()
+title_s  <- createStyle(fontSize=12, textDecoration="bold",
+                        halign="left", valign="center")
+header_s <- createStyle(fontSize=11, textDecoration="bold",
+                        fgFill="#EBF4FB", halign="left",
+                        border="bottom", borderStyle="thin")
+body_s   <- createStyle(fontSize=11, halign="left",
+                        valign="top", wrapText=TRUE)
+roll_s   <- createStyle(fontSize=11, textDecoration="bold",
+                        fgFill="#EBF4FB", halign="left", wrapText=TRUE)
+neg_s    <- createStyle(fontSize=11, fontColour="#888888",
+                        textDecoration="italic",
+                        halign="left", wrapText=TRUE)
+note_s   <- createStyle(fontSize=9, fontColour="#555555",
+                        wrapText=TRUE, halign="left", valign="top")
+
+sheet_nm <- "NIS 2023 FN Procedures"
+addWorksheet(wb, sheet_nm)
+
+writeData(wb, sheet_nm,
+          "NIS 2023: Facial Nerve Repair, Supplement & Reposition",
+          startRow=1, startCol=1)
+addStyle(wb, sheet_nm, title_s, rows=1, cols=1)
+mergeCells(wb, sheet_nm, cols=1:4, rows=1)
+
+writeData(wb, sheet_nm, freq_pub, startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, sheet_nm, header_s, rows=3, cols=1:4, gridExpand=TRUE)
+
+for (i in seq_len(nrow(freq_pub))) {
+  sty <- if   (grepl("^ROLLUP", freq_pub$pcs_code[i])) roll_s
+         else if (grepl("^00QM",   freq_pub$pcs_code[i])) neg_s
+         else body_s
+  addStyle(wb, sheet_nm, sty, rows=i+3, cols=1:4, gridExpand=TRUE)
+}
+
+setColWidths(wb, sheet_nm, cols=1,   widths=20)
+setColWidths(wb, sheet_nm, cols=2,   widths=58)
+setColWidths(wb, sheet_nm, cols=3:4, widths=22)
+
+fn_row <- nrow(freq_pub) + 5
+writeData(wb, sheet_nm, paste0(
+  "Source: HCUP NIS 2023 Core File (NIS_2023_Core.ASC). ",
+  "Column positions from StataLoad_NIS_2023_Core.Do (HCUP, 12/10/2025). ",
+  "DISCWT scaled by 1e7 per HCUP specification. ",
+  "Codes searched across I10_PR1\u2013I10_PR25 (cols 355\u2013529). ",
+  "Cells with unweighted N <11 suppressed per HCUP DUA. ",
+  "Survey design: NIS_STRATUM strata, HOSP_NIS cluster, DISCWT weight."),
+  startRow=fn_row, startCol=1)
+mergeCells(wb, sheet_nm, cols=1:4, rows=fn_row)
+addStyle(wb, sheet_nm, note_s, rows=fn_row, cols=1)
+setRowHeights(wb, sheet_nm, rows=fn_row, heights=70)
+
+xlsx_path <- file.path(path.expand(output_dir),
+                       "NIS_2023_FacialNerve_Procedures_v1.0.xlsx")
+saveWorkbook(wb, xlsx_path, overwrite=TRUE)
+message("Excel saved: ", xlsx_path)
+
+# ── Word ──────────────────────────────────────────────────────────────────────
+save_gt_to_word <- function(gt_tbl, filename) {
+  filepath <- file.path(path.expand(output_dir), filename)
+  gt::gtsave(gt_tbl, filename=filepath)
+  message("Word saved: ", filename)
+}
+
+save_gt_to_word(gt_nis_supp,
+                "Table_NIS2023_FacialNerve_Procedures_v1.0.docx")
+
+message("\nAll outputs saved to: ", path.expand(output_dir))
+message("Files in output folder:")
+print(list.files(path.expand(output_dir)))
+```
+
+# Session Info
+
+```{r session}
+sessionInfo()
+```
+
+<!--
+==============================================================================
+VERSION HISTORY
+==============================================================================
+v1.0  2026-04-27  Initial version. Reads NIS_2023_Core.ASC as fixed-width
+                  ASCII using readr::read_fwf(). Column positions taken
+                  directly from StataLoad_NIS_2023_Core.Do (HCUP, 12/10/2025):
+                    HOSP_NIS     cols   1–5    (long)
+                    NIS_STRATUM  cols  16–19   (int)
+                    DISCWT       cols  31–41   (double, raw ÷ 1e7)
+                    I10_PR1      cols 355–361  (str, 7 chars)
+                    I10_PR2      cols 362–368
+                    I10_PR3      cols 369–375
+                    I10_PR4      cols 376–382
+                    I10_PR5      cols 383–389
+                    I10_PR6      cols 390–396
+                    I10_PR7      cols 397–403
+                    I10_PR8      cols 404–410
+                    I10_PR9      cols 411–417
+                    I10_PR10     cols 418–424
+                    I10_PR11     cols 425–431
+                    I10_PR12     cols 432–438
+                    I10_PR13     cols 439–445
+                    I10_PR14     cols 446–452
+                    I10_PR15     cols 453–459
+                    I10_PR16     cols 460–466
+                    I10_PR17     cols 467–473
+                    I10_PR18     cols 474–480
+                    I10_PR19     cols 481–487
+                    I10_PR20     cols 488–494
+                    I10_PR21     cols 495–501
+                    I10_PR22     cols 502–508
+                    I10_PR23     cols 509–515
+                    I10_PR24     cols 516–522
+                    I10_PR25     cols 523–529
+                  HCUP missing-value sentinels applied per Stata do-file.
+                  Codes: 01QM (Repair PNS), 01UM (Supplement),
+                  01SM (Reposition), 00QM (CNS — intended neg control).
+                  Survey design: NIS_STRATUM strata, HOSP_NIS cluster,
+                  DISCWT weight, nest=TRUE, lonely.psu="adjust".
+                  HCUP DUA suppression (<11 unweighted) applied to exports.
+                  Key findings on first run (2026-04-27):
+                    01QM (PNS correct):  3 unweighted
+                    01UM (Supplement):   0
+                    01SM (Reposition):   0
+                    00QM (CNS):         54 unweighted — UNEXPECTED FINDING.
+                      Intended as negative control but returned 54 cases,
+                      indicating systematic ICD-10-PCS miscoding: coders
+                      assigned CNS body-system section to a peripheral nerve.
+                      94.7% of all inpatient facial nerve repair attempts
+                      were miscoded. Novel data-quality finding for manuscript.
+                    Total (union):      57 unweighted
+                  Fixes applied same session:
+                    - round(wt_est) → round(wt_est,1): prevents fractional
+                      weighted Ns truncating to 0 on display.
+                    - Union flag updated to include 00QM so total = 57.
+                    - Decision logic updated with per-section breakdown
+                      and % miscoded.
+                    - Methods/results paragraph language added (echo=false).
+                    - Pub table footnote updated to describe CNS finding.
+                    - Word export fixed: as_flex_table → gt::gtsave to
+                      match working pattern in nass_phase2_analysis_1_5.qmd.
+==============================================================================
+-->

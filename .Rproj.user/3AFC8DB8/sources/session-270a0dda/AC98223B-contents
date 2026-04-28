@@ -1,0 +1,573 @@
+---
+title: "NIS 2023 Facial Nerve Miscoding Confirmation \u2014 Diagnosis Profile"
+author: "Solomon Johnson"
+date: "`r Sys.Date()`"
+output-file: "nis_facial_nerve_miscoding_confirmation_v1.1.html"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: true
+  freeze: auto
+---
+
+# Purpose
+
+The v1.0 analysis (`nis_facial_nerve_supplement_query_v1.0_2026-04-27.qmd`)
+identified 54 inpatient discharges with facial nerve repair codes assigned
+to the Central Nervous System ICD-10-PCS section (00QM) rather than the
+correct Peripheral Nervous System section (01QM). This pattern was
+hypothesised to represent a systematic body-system assignment error.
+
+This v1.1 analysis tests that hypothesis by examining the co-occurring
+ICD-10-CM diagnosis codes on the 57 inpatient facial nerve repair cases
+(3 correctly coded PNS + 54 miscoded CNS). If the diagnostic profiles of
+the two groups are similar and clinically consistent with facial nerve
+pathology, the miscoding interpretation is confirmed. If the diagnostic
+profiles differ markedly, an alternative explanation must be sought.
+
+**Diagnostic categories examined:**
+
+- *Facial-nerve-consistent (positive evidence for miscoding hypothesis)*
+  - Facial nerve disorders (G51.x)
+  - Traumatic facial nerve injury (S04.5x)
+  - Parotid neoplasms (C07, D11.0) \u2014 most common elective context
+  - Vestibular schwannoma / CPA tumours (D33.3, C72.4x)
+  - Temporal bone fracture (S02.1x)
+  - Facial soft-tissue laceration (S01.4x, S01.8x)
+  - Other cranial nerve disorders (G52.x)
+
+- *Negative controls (would refute miscoding hypothesis)*
+  - Spinal cord injury (S14.x, S24.x, S34.x)
+  - Non-CPA brain tumours (C71.0\u2013C71.2)
+  - Cerebrovascular accident (I60\u2013I63)
+
+```{r setup}
+#| cache: false
+pkgs <- c("readr","dplyr","purrr","tidyr","stringr","survey",
+          "openxlsx","knitr","kableExtra","gt")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+
+library(readr);     library(dplyr);     library(purrr);    library(tidyr)
+library(stringr);   library(survey);    library(openxlsx); library(knitr)
+library(kableExtra);library(gt)
+
+output_dir <- "~/Desktop/NIS Facial Nerve Query Output 1.1"
+dir.create(path.expand(output_dir), showWarnings = FALSE)
+```
+
+# Configuration
+
+```{r config}
+# ── File path ─────────────────────────────────────────────────────────────────
+nis_core_asc <- paste0(
+  "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/",
+  "NASS traumatic facial nerve repair project/Data/",
+  "HCUP Original Data Files 21 through 23/HCUP NIS/NIS_2023/",
+  "NIS_2023_Core.ASC"
+)
+
+# ── Column positions from StataLoad_NIS_2023_Core.Do (12/10/2025) ────────────
+# Adds I10_DX1\u2013I10_DX40 (cols 67\u2013346) to the v1.0 spec.
+col_spec <- fwf_cols(
+  HOSP_NIS    = c(1,   5),
+  NIS_STRATUM = c(16,  19),
+  DISCWT      = c(31,  41),
+  # Diagnoses (40 fields, 7 chars each)
+  I10_DX1   = c(67,  73),  I10_DX2  = c(74,  80),  I10_DX3  = c(81,  87),
+  I10_DX4   = c(88,  94),  I10_DX5  = c(95, 101),  I10_DX6  = c(102,108),
+  I10_DX7   = c(109,115),  I10_DX8  = c(116,122),  I10_DX9  = c(123,129),
+  I10_DX10  = c(130,136),  I10_DX11 = c(137,143),  I10_DX12 = c(144,150),
+  I10_DX13  = c(151,157),  I10_DX14 = c(158,164),  I10_DX15 = c(165,171),
+  I10_DX16  = c(172,178),  I10_DX17 = c(179,185),  I10_DX18 = c(186,192),
+  I10_DX19  = c(193,199),  I10_DX20 = c(200,206),  I10_DX21 = c(207,213),
+  I10_DX22  = c(214,220),  I10_DX23 = c(221,227),  I10_DX24 = c(228,234),
+  I10_DX25  = c(235,241),  I10_DX26 = c(242,248),  I10_DX27 = c(249,255),
+  I10_DX28  = c(256,262),  I10_DX29 = c(263,269),  I10_DX30 = c(270,276),
+  I10_DX31  = c(277,283),  I10_DX32 = c(284,290),  I10_DX33 = c(291,297),
+  I10_DX34  = c(298,304),  I10_DX35 = c(305,311),  I10_DX36 = c(312,318),
+  I10_DX37  = c(319,325),  I10_DX38 = c(326,332),  I10_DX39 = c(333,339),
+  I10_DX40  = c(340,346),
+  # Procedures (25 fields, 7 chars each)
+  I10_PR1   = c(355,361),  I10_PR2  = c(362,368),  I10_PR3  = c(369,375),
+  I10_PR4   = c(376,382),  I10_PR5  = c(383,389),  I10_PR6  = c(390,396),
+  I10_PR7   = c(397,403),  I10_PR8  = c(404,410),  I10_PR9  = c(411,417),
+  I10_PR10  = c(418,424),  I10_PR11 = c(425,431),  I10_PR12 = c(432,438),
+  I10_PR13  = c(439,445),  I10_PR14 = c(446,452),  I10_PR15 = c(453,459),
+  I10_PR16  = c(460,466),  I10_PR17 = c(467,473),  I10_PR18 = c(474,480),
+  I10_PR19  = c(481,487),  I10_PR20 = c(488,494),  I10_PR21 = c(495,501),
+  I10_PR22  = c(502,508),  I10_PR23 = c(509,515),  I10_PR24 = c(516,522),
+  I10_PR25  = c(523,529)
+)
+
+# HCUP missing-value sentinels
+HOSP_NIS_NA <- c(-9999, -8888, -6666)
+STRATUM_NA  <- c(-999,  -888,  -666)
+DISCWT_NA   <- c(-99.9999999, -88.8888888, -66.6666666)
+
+# Target PCS codes
+pcs_correct  <- c("01QM0ZZ","01QM3ZZ","01QM4ZZ")
+pcs_miscoded <- c("00QM0ZZ","00QM3ZZ","00QM4ZZ")
+all_target   <- c(pcs_correct, pcs_miscoded)
+
+# ── Diagnosis category definitions (ICD-10-CM prefix matching) ───────────────
+# Each entry is a vector of regex anchors. A code matches a category if it
+# starts with any of the listed prefixes (after trimming).
+
+dx_categories <- list(
+  # ── Facial-nerve-consistent ────────────────────────────────────────────────
+  "Facial nerve disorder (G51.x)"       = "^G51",
+  "Traumatic facial nerve injury (S04.5)" = "^S045",
+  "Parotid neoplasm \u2014 malignant (C07)" = "^C07",
+  "Parotid neoplasm \u2014 benign (D11.0)"  = "^D110",
+  "Vestibular schwannoma (D33.3)"       = "^D333",
+  "CPA / cranial nerve neoplasm (C72.4)" = "^C724",
+  "Temporal bone fracture (S02.1)"      = "^S021",
+  "Facial soft-tissue laceration (S01.4/S01.8)" = "^(S014|S018)",
+  "Other cranial nerve disorder (G52.x)" = "^G52",
+  "Hemifacial spasm (G51.3)"            = "^G513",  # subset, but common standalone
+  # ── Negative controls (refute miscoding if dominant) ───────────────────────
+  "Spinal cord injury (S14/S24/S34)"    = "^(S14|S24|S34)",
+  "Non-CPA brain tumour (C71.0-C71.2)"  = "^C71[012]",
+  "CVA / stroke (I60-I63)"              = "^I6[0-3]",
+  "Skull base / pituitary tumour (D35.2)" = "^D352"
+)
+
+# Marker for which categories support vs. refute the hypothesis
+category_polarity <- c(
+  rep("supports",  10),  # first 10 = facial-nerve-consistent
+  rep("refutes",    4)   # last 4 = negative controls
+)
+names(category_polarity) <- names(dx_categories)
+```
+
+# Data Extraction
+
+```{r extract}
+#| cache: true
+stopifnot(file.exists(nis_core_asc))
+
+message("Reading NIS_2023_Core.ASC with diagnosis + procedure fields...")
+message("Estimated time: 5\u201310 minutes (more columns than v1.0).")
+
+core <- read_fwf(
+  file          = nis_core_asc,
+  col_positions = col_spec,
+  col_types     = cols(
+    HOSP_NIS    = col_integer(),
+    NIS_STRATUM = col_integer(),
+    DISCWT      = col_double(),
+    .default    = col_character()
+  ),
+  na = c("", " ")
+)
+
+# Apply HCUP missing recodes
+core <- core %>%
+  mutate(
+    HOSP_NIS    = if_else(HOSP_NIS    %in% HOSP_NIS_NA, NA_integer_, HOSP_NIS),
+    NIS_STRATUM = if_else(NIS_STRATUM %in% STRATUM_NA,  NA_integer_, NIS_STRATUM),
+    DISCWT      = if_else(DISCWT      %in% DISCWT_NA,   NA_real_,    DISCWT)
+  )
+
+# Trim whitespace from all DX and PR fields
+dx_cols <- grep("^I10_DX[0-9]+$", names(core), value=TRUE)
+pr_cols <- grep("^I10_PR[0-9]+$", names(core), value=TRUE)
+core    <- core %>% mutate(across(all_of(c(dx_cols, pr_cols)), trimws))
+
+message("Rows loaded: ", format(nrow(core), big.mark=","))
+message("Diagnosis fields: ", length(dx_cols),
+        "; Procedure fields: ", length(pr_cols))
+```
+
+# Identify the 57 Facial Nerve Repair Cases
+
+```{r identify-cases}
+#| cache: true
+flag_any_code <- function(df, codes, fields) {
+  as.integer(rowSums(
+    sapply(fields, function(col) df[[col]] %in% codes, USE.NAMES=FALSE)
+  ) > 0)
+}
+
+core$has_correct_pcs  <- flag_any_code(core, pcs_correct,  pr_cols)
+core$has_miscoded_pcs <- flag_any_code(core, pcs_miscoded, pr_cols)
+core$facial_nerve_any <- as.integer(
+  (core$has_correct_pcs + core$has_miscoded_pcs) > 0
+)
+
+# Subset to facial nerve repair cases only
+fn_cases <- core %>% filter(facial_nerve_any == 1L)
+
+# Assign group label. If both flags are present (extremely rare), label as
+# "Both" so it doesn't get double-counted.
+fn_cases <- fn_cases %>%
+  mutate(group = case_when(
+    has_correct_pcs == 1L & has_miscoded_pcs == 1L ~ "Both sections",
+    has_correct_pcs == 1L                           ~ "PNS (correct)",
+    has_miscoded_pcs == 1L                          ~ "CNS (miscoded)"
+  ))
+
+cat("── Facial nerve repair cases identified ───────────────────\n")
+cat(sprintf("  PNS correct (01QM):   %d\n", sum(fn_cases$group == "PNS (correct)")))
+cat(sprintf("  CNS miscoded (00QM):  %d\n", sum(fn_cases$group == "CNS (miscoded)")))
+cat(sprintf("  Both sections:        %d\n", sum(fn_cases$group == "Both sections")))
+cat(sprintf("  TOTAL:                %d\n", nrow(fn_cases)))
+```
+
+# Diagnosis Category Flagging
+
+```{r flag-dx}
+#| cache: true
+# For each case, check whether ANY of its 40 diagnosis fields matches each
+# category's regex prefix. trimws already applied during load.
+
+flag_dx_category <- function(df, regex, dx_cols) {
+  as.integer(rowSums(
+    sapply(dx_cols, function(col)
+      grepl(regex, df[[col]]), USE.NAMES=FALSE),
+    na.rm = TRUE
+  ) > 0)
+}
+
+for (cat_name in names(dx_categories)) {
+  fn_cases[[paste0("dx_", cat_name)]] <-
+    flag_dx_category(fn_cases, dx_categories[[cat_name]], dx_cols)
+}
+
+# Composite flags
+supports_cols <- paste0("dx_", names(dx_categories)[category_polarity == "supports"])
+refutes_cols  <- paste0("dx_", names(dx_categories)[category_polarity == "refutes"])
+
+fn_cases$any_supporting_dx <- as.integer(
+  rowSums(fn_cases[, supports_cols, drop=FALSE]) > 0
+)
+fn_cases$any_refuting_dx   <- as.integer(
+  rowSums(fn_cases[, refutes_cols, drop=FALSE]) > 0
+)
+```
+
+# Diagnostic Profile Comparison
+
+```{r dx-profile-table}
+#| cache: false
+# Build long table: rows = categories, columns = group counts.
+# Both unweighted (HCUP DUA threshold) and weighted national estimates.
+
+build_profile <- function(cases, category_names) {
+  groups <- c("PNS (correct)", "CNS (miscoded)", "Both sections")
+  rows <- list()
+
+  # Survey design on full core (preserves variance structure)
+  options(survey.lonely.psu = "adjust")
+  svy_full <- svydesign(
+    ids=~HOSP_NIS, strata=~NIS_STRATUM, weights=~DISCWT,
+    data=core, nest=TRUE
+  )
+
+  for (cat_name in category_names) {
+    flag_var <- paste0("dx_", cat_name)
+    row <- list(category = cat_name,
+                polarity = category_polarity[cat_name])
+    for (grp in groups) {
+      sub <- cases[cases$group == grp, ]
+      n_unwt <- sum(sub[[flag_var]], na.rm=TRUE)
+      # Weighted estimate restricted to this group
+      n_wt <- if (n_unwt > 0L) {
+        # subset on group AND diagnosis flag in the full survey design
+        keys <- which(core$facial_nerve_any == 1L &
+                       (if (grp == "PNS (correct)") core$has_correct_pcs == 1L &
+                                                     core$has_miscoded_pcs == 0L
+                        else if (grp == "CNS (miscoded)") core$has_miscoded_pcs == 1L &
+                                                          core$has_correct_pcs == 0L
+                        else core$has_correct_pcs == 1L & core$has_miscoded_pcs == 1L))
+        # Build a flag column on core matching this group + dx
+        core_flag <- rep(0L, nrow(core))
+        if (length(keys) > 0L) {
+          dx_hits <- core[keys, dx_cols, drop=FALSE]
+          regex   <- dx_categories[[cat_name]]
+          has_dx  <- rowSums(sapply(dx_cols, function(c) grepl(regex, core[[c]][keys])),
+                             na.rm = TRUE) > 0
+          core_flag[keys[has_dx]] <- 1L
+        }
+        core$.tmpflag <<- core_flag
+        svy_tmp <- update(svy_full, .tmpflag = .tmpflag)
+        round(as.numeric(svytotal(~.tmpflag, svy_tmp, na.rm=TRUE)[1]), 1)
+      } else 0
+      row[[paste0(grp, " (unwt)")]] <- n_unwt
+      row[[paste0(grp, " (wt)")]]   <- n_wt
+    }
+    rows[[cat_name]] <- row
+  }
+  bind_rows(rows)
+}
+
+profile <- build_profile(fn_cases, names(dx_categories))
+core$.tmpflag <- NULL  # cleanup
+
+# Reorder: supporting categories first, then refuting
+profile <- profile %>%
+  mutate(polarity = factor(polarity, levels=c("supports","refutes"))) %>%
+  arrange(polarity, category)
+
+# Internal display (unsuppressed)
+profile %>%
+  select(category, polarity,
+         `PNS (correct) (unwt)`, `PNS (correct) (wt)`,
+         `CNS (miscoded) (unwt)`, `CNS (miscoded) (wt)`,
+         `Both sections (unwt)`, `Both sections (wt)`) %>%
+  kable(
+    caption = paste0("INTERNAL ONLY \u2014 Co-occurring diagnosis profile by ",
+                     "PCS section assignment. HCUP NIS 2023."),
+    col.names = c("Diagnosis category","Polarity",
+                  "PNS unwt","PNS wt",
+                  "CNS unwt","CNS wt",
+                  "Both unwt","Both wt"),
+    format.args = list(big.mark = ",")
+  ) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=TRUE) %>%
+  row_spec(which(profile$polarity == "supports"), background="#E8F4E8") %>%
+  row_spec(which(profile$polarity == "refutes"),  background="#FBE8E8")
+```
+
+# Verdict
+
+```{r verdict}
+#| cache: false
+# Summary statistics for the verdict.
+
+cns_total      <- sum(fn_cases$group == "CNS (miscoded)")
+cns_supporting <- sum(fn_cases$group == "CNS (miscoded)" &
+                      fn_cases$any_supporting_dx == 1L)
+cns_refuting   <- sum(fn_cases$group == "CNS (miscoded)" &
+                      fn_cases$any_refuting_dx == 1L)
+cns_neither    <- cns_total - cns_supporting   # may overlap with refuting
+
+pns_total      <- sum(fn_cases$group == "PNS (correct)")
+pns_supporting <- sum(fn_cases$group == "PNS (correct)" &
+                      fn_cases$any_supporting_dx == 1L)
+
+pct <- function(x, n) if (n > 0) sprintf("%.1f%%", 100 * x / n) else "n/a"
+
+cat("── Hypothesis test verdict ─────────────────────────────────\n\n")
+cat(sprintf("CNS-miscoded cases (n=%d):\n", cns_total))
+cat(sprintf("  With \u22651 facial-nerve-consistent diagnosis:  %d (%s)\n",
+            cns_supporting, pct(cns_supporting, cns_total)))
+cat(sprintf("  With \u22651 negative-control diagnosis:        %d (%s)\n",
+            cns_refuting, pct(cns_refuting, cns_total)))
+cat(sprintf("  With NO facial-nerve-consistent diagnosis:  %d (%s)\n\n",
+            cns_total - cns_supporting, pct(cns_total - cns_supporting, cns_total)))
+
+cat(sprintf("PNS-correct cases (n=%d):\n", pns_total))
+cat(sprintf("  With \u22651 facial-nerve-consistent diagnosis:  %d (%s)\n\n",
+            pns_supporting, pct(pns_supporting, pns_total)))
+
+verdict <- case_when(
+  cns_total == 0 ~
+    "INDETERMINATE: no CNS cases to evaluate.",
+  (cns_supporting / cns_total) >= 0.70 ~
+    "CONFIRMED: \u226570% of CNS-section cases carry diagnoses consistent with facial nerve pathology, supporting the systematic miscoding hypothesis. The remaining cases may carry less specific diagnoses (e.g., postoperative status, unspecified facial weakness) that are still compatible with facial nerve repair.",
+  (cns_supporting / cns_total) >= 0.40 ~
+    "PARTIALLY CONFIRMED: A substantial fraction of CNS-section cases carry facial-nerve-consistent diagnoses, but a sizeable minority do not. The miscoding hypothesis is supported but additional explanations may be needed for cases lacking specific facial nerve diagnoses (e.g., very brief admissions where the facial nerve diagnosis was not coded, or genuine non-facial uses of the 00QM codes).",
+  TRUE ~
+    "NOT CONFIRMED: The diagnostic profile of CNS-section cases does not predominantly point to facial nerve pathology. The miscoding hypothesis must be revised \u2014 alternative explanations should be considered, including the possibility that 00QM codes are being used for legitimate CNS procedures involving the facial nerve root, or for some non-facial purpose we have not identified."
+)
+
+cat("VERDICT: ", verdict, "\n")
+```
+
+# Publication Table (Suppressed)
+
+```{r pub-table}
+#| cache: false
+# HCUP DUA: cells with unweighted N <11 must be suppressed in published output.
+hcup_suppress <- function(unwt, wt) {
+  if (unwt == 0L)            list(u="0",                 w="0")
+  else if (unwt < 11L)       list(u="<11 (suppressed)",  w="Suppressed")
+  else                       list(u=format(unwt, big.mark=","),
+                                  w=format(wt,   big.mark=","))
+}
+
+profile_pub <- profile %>%
+  rowwise() %>%
+  mutate(
+    pns_disp = list(hcup_suppress(`PNS (correct) (unwt)`,  `PNS (correct) (wt)`)),
+    cns_disp = list(hcup_suppress(`CNS (miscoded) (unwt)`, `CNS (miscoded) (wt)`)),
+    bth_disp = list(hcup_suppress(`Both sections (unwt)`,  `Both sections (wt)`))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    pns_str = paste0(map_chr(pns_disp, "u"), " (", map_chr(pns_disp, "w"), ")"),
+    cns_str = paste0(map_chr(cns_disp, "u"), " (", map_chr(cns_disp, "w"), ")"),
+    bth_str = paste0(map_chr(bth_disp, "u"), " (", map_chr(bth_disp, "w"), ")")
+  ) %>%
+  select(category, polarity, pns_str, cns_str, bth_str)
+
+gt_dx <- profile_pub %>%
+  setNames(c("Diagnosis category","Polarity",
+             "PNS (correct) \u2014 N (wt)",
+             "CNS (miscoded) \u2014 N (wt)",
+             "Both \u2014 N (wt)")) %>%
+  gt() %>%
+  tab_header(
+    title    = md("**Diagnostic Profile of NIS 2023 Facial Nerve Repair Cases by ICD-10-PCS Section**"),
+    subtitle = md("*Confirmation of CNS-vs-PNS miscoding hypothesis*")
+  ) %>%
+  tab_footnote(footnote = md(paste0(
+    "Source: HCUP NIS 2023 Core File. ICD-10-CM diagnoses (I10_DX1\u2013I10_DX40) ",
+    "examined for the 57 unweighted inpatient discharges with any facial nerve ",
+    "repair PCS code (01QM PNS or 00QM CNS) in any procedure field. ",
+    "Cells displayed as: unweighted N (weighted national estimate). ",
+    "Cells with unweighted N\u00a0<\u00a011 suppressed per HCUP DUA. ",
+    "Green-flagged categories support the miscoding hypothesis (i.e., diagnoses ",
+    "clinically consistent with facial nerve repair). Red-flagged categories ",
+    "are negative controls that would refute the hypothesis if dominant. ",
+    "Survey design: NIS_STRATUM strata, HOSP_NIS cluster, DISCWT weight."
+  ))) %>%
+  tab_style(
+    style     = list(cell_fill(color="#E8F4E8")),
+    locations = cells_body(rows = profile_pub$polarity == "supports")
+  ) %>%
+  tab_style(
+    style     = list(cell_fill(color="#FBE8E8")),
+    locations = cells_body(rows = profile_pub$polarity == "refutes")
+  ) %>%
+  tab_style(
+    style     = cell_fill(color="#EBF4FB"),
+    locations = cells_column_labels()
+  ) %>%
+  cols_hide(columns = "Polarity") %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(
+    table.font.size           = 11,
+    heading.title.font.size   = 12,
+    column_labels.font.weight = "bold"
+  )
+
+gt_dx
+```
+
+# Export Outputs
+
+```{r export}
+#| cache: false
+
+# ── Excel ────────────────────────────────────────────────────────────────────
+wb       <- createWorkbook()
+title_s  <- createStyle(fontSize=12, textDecoration="bold",
+                        halign="left", valign="center")
+header_s <- createStyle(fontSize=11, textDecoration="bold",
+                        fgFill="#EBF4FB", halign="left",
+                        border="bottom", borderStyle="thin")
+supp_s   <- createStyle(fontSize=11, fgFill="#E8F4E8",
+                        halign="left", valign="top", wrapText=TRUE)
+refu_s   <- createStyle(fontSize=11, fgFill="#FBE8E8",
+                        halign="left", valign="top", wrapText=TRUE)
+note_s   <- createStyle(fontSize=9, fontColour="#555555",
+                        wrapText=TRUE, halign="left", valign="top")
+
+sheet_nm <- "Diagnosis profile"
+addWorksheet(wb, sheet_nm)
+
+writeData(wb, sheet_nm,
+          "NIS 2023 Facial Nerve Repair \u2014 Diagnostic Profile by PCS Section",
+          startRow=1, startCol=1)
+addStyle(wb, sheet_nm, title_s, rows=1, cols=1)
+mergeCells(wb, sheet_nm, cols=1:5, rows=1)
+
+# Reorganise for Excel (drop the polarity helper column from view but keep
+# row colouring)
+excel_tbl <- profile_pub %>%
+  select(`Diagnosis category`=category,
+         `PNS (correct) \u2014 N (wt)`  = pns_str,
+         `CNS (miscoded) \u2014 N (wt)` = cns_str,
+         `Both \u2014 N (wt)`            = bth_str)
+
+writeData(wb, sheet_nm, excel_tbl, startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, sheet_nm, header_s, rows=3, cols=1:4, gridExpand=TRUE)
+
+for (i in seq_len(nrow(excel_tbl))) {
+  sty <- if (profile_pub$polarity[i] == "supports") supp_s else refu_s
+  addStyle(wb, sheet_nm, sty, rows=i+3, cols=1:4, gridExpand=TRUE)
+}
+
+setColWidths(wb, sheet_nm, cols=1,   widths=42)
+setColWidths(wb, sheet_nm, cols=2:4, widths=24)
+
+fn_row <- nrow(excel_tbl) + 5
+writeData(wb, sheet_nm, paste0(
+  "Source: HCUP NIS 2023. Diagnoses examined across I10_DX1\u2013I10_DX40 ",
+  "(40 fields) for 57 unweighted facial nerve repair cases. ",
+  "Format: unweighted N (weighted national estimate). ",
+  "Cells <11 unweighted suppressed per HCUP DUA. ",
+  "Green = facial-nerve-consistent (supports miscoding hypothesis). ",
+  "Red = negative control (would refute if dominant)."),
+  startRow=fn_row, startCol=1)
+mergeCells(wb, sheet_nm, cols=1:4, rows=fn_row)
+addStyle(wb, sheet_nm, note_s, rows=fn_row, cols=1)
+setRowHeights(wb, sheet_nm, rows=fn_row, heights=70)
+
+xlsx_path <- file.path(path.expand(output_dir),
+                       "NIS_2023_FacialNerve_DxProfile_v1.1.xlsx")
+saveWorkbook(wb, xlsx_path, overwrite=TRUE)
+message("Excel saved: ", xlsx_path)
+
+# ── Word ──────────────────────────────────────────────────────────────────────
+save_gt_to_word <- function(gt_tbl, filename) {
+  filepath <- file.path(path.expand(output_dir), filename)
+  gt::gtsave(gt_tbl, filename=filepath)
+  message("Word saved: ", filename)
+}
+
+save_gt_to_word(gt_dx,
+                "Table_NIS2023_FacialNerve_DxProfile_v1.1.docx")
+```
+
+# Session Info
+
+```{r session}
+sessionInfo()
+```
+
+<!--
+==============================================================================
+VERSION HISTORY
+==============================================================================
+v1.1  2026-04-27  Confirmation analysis for the v1.0 finding that 54/57
+                  inpatient facial nerve repair cases were coded to the wrong
+                  ICD-10-PCS body-system section (CNS / 00QM instead of
+                  PNS / 01QM). Tests the miscoding hypothesis by examining
+                  co-occurring ICD-10-CM diagnoses (I10_DX1–I10_DX40, cols
+                  67–346) on each case and tabulating clinically meaningful
+                  categories by group (PNS-correct vs CNS-miscoded).
+
+                  Method: regex prefix matching on trimmed diagnosis fields.
+                  14 categories total — 10 facial-nerve-consistent ("supports"
+                  the hypothesis) and 4 negative controls ("refutes" if
+                  dominant).
+
+                  Decision rule for verdict:
+                    \u226570% of CNS cases with supporting dx → CONFIRMED
+                    40-69%                                   → PARTIALLY CONFIRMED
+                    <40%                                     → NOT CONFIRMED
+
+                  Inherits all v1.0 conventions: read_fwf with column
+                  positions from StataLoad_NIS_2023_Core.Do (12/10/2025);
+                  HCUP missing-value sentinels per Stata recode;
+                  survey design with NIS_STRATUM/HOSP_NIS/DISCWT;
+                  HCUP DUA <11 cell suppression on published output;
+                  gt::gtsave for Word export.
+
+                  Outputs: gt inline table, Excel, Word — saved to
+                  ~/Desktop/NIS Facial Nerve Query Output 1.1/
+==============================================================================
+-->

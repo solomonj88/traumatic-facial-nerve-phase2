@@ -1,0 +1,518 @@
+---
+title: "NIS 2023 Facial Nerve Repair \u2014 Traumatic vs. Non-Traumatic Classification"
+author: "Solomon Johnson"
+date: "`r Sys.Date()`"
+output-file: "nis_facial_nerve_trauma_classification_v1.2.html"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+---
+
+# Purpose
+
+The v1.1 analysis confirmed that 94.7% of inpatient facial nerve repair
+cases in NIS 2023 were coded to the wrong ICD-10-PCS section, and that
+14 cases each carried S04.5 (traumatic facial nerve injury) or S01.4/S01.8
+(facial laceration) diagnoses. Those counts were per-category and did not
+deduplicate — a single patient may carry both codes.
+
+This v1.2 analysis produces a **precise, deduplicated traumatic case count**
+by flagging each of the 57 cases as traumatic if it carries **any** of:
+
+- `S04.5xxx` — Injury of facial nerve (any encounter type)
+- `S01.4xxx` — Open wound, cheek and temporomandibular area
+- `S01.8xxx` — Open wound, other parts of head
+- `V01–Y99`  — External cause of morbidity (mechanism of injury codes)
+
+A case is classified traumatic if it meets **any one** of these criteria in
+any of the 40 diagnosis fields. Cases meeting none are classified
+non-traumatic. The external-cause code sweep is the most sensitive net —
+it catches traumatic cases where the nerve injury code may not have been
+coded specifically but where an injury mechanism was documented.
+
+```{r setup}
+#| cache: false
+pkgs <- c("readr","dplyr","purrr","tidyr","stringr","survey",
+          "openxlsx","knitr","kableExtra","gt")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+
+library(readr);     library(dplyr);     library(purrr);    library(tidyr)
+library(stringr);   library(survey);    library(openxlsx); library(knitr)
+library(kableExtra);library(gt)
+
+output_dir <- "~/Desktop/NIS Facial Nerve Query Output 1.2"
+dir.create(path.expand(output_dir), showWarnings = FALSE)
+```
+
+# Configuration
+
+```{r config}
+# ── File path ─────────────────────────────────────────────────────────────────
+nis_core_asc <- paste0(
+  "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/",
+  "NASS traumatic facial nerve repair project/Data/",
+  "HCUP Original Data Files 21 through 23/HCUP NIS/NIS_2023/",
+  "NIS_2023_Core.ASC"
+)
+
+# ── Column positions from StataLoad_NIS_2023_Core.Do (12/10/2025) ────────────
+# Same spec as v1.1: diagnoses + procedures. No new columns needed.
+col_spec <- fwf_cols(
+  HOSP_NIS    = c(1,   5),
+  NIS_STRATUM = c(16,  19),
+  DISCWT      = c(31,  41),
+  # Diagnoses (40 fields, 7 chars each)
+  I10_DX1   = c(67,  73),  I10_DX2  = c(74,  80),  I10_DX3  = c(81,  87),
+  I10_DX4   = c(88,  94),  I10_DX5  = c(95, 101),  I10_DX6  = c(102,108),
+  I10_DX7   = c(109,115),  I10_DX8  = c(116,122),  I10_DX9  = c(123,129),
+  I10_DX10  = c(130,136),  I10_DX11 = c(137,143),  I10_DX12 = c(144,150),
+  I10_DX13  = c(151,157),  I10_DX14 = c(158,164),  I10_DX15 = c(165,171),
+  I10_DX16  = c(172,178),  I10_DX17 = c(179,185),  I10_DX18 = c(186,192),
+  I10_DX19  = c(193,199),  I10_DX20 = c(200,206),  I10_DX21 = c(207,213),
+  I10_DX22  = c(214,220),  I10_DX23 = c(221,227),  I10_DX24 = c(228,234),
+  I10_DX25  = c(235,241),  I10_DX26 = c(242,248),  I10_DX27 = c(249,255),
+  I10_DX28  = c(256,262),  I10_DX29 = c(263,269),  I10_DX30 = c(270,276),
+  I10_DX31  = c(277,283),  I10_DX32 = c(284,290),  I10_DX33 = c(291,297),
+  I10_DX34  = c(298,304),  I10_DX35 = c(305,311),  I10_DX36 = c(312,318),
+  I10_DX37  = c(319,325),  I10_DX38 = c(326,332),  I10_DX39 = c(333,339),
+  I10_DX40  = c(340,346),
+  # Procedures (25 fields, 7 chars each)
+  I10_PR1   = c(355,361),  I10_PR2  = c(362,368),  I10_PR3  = c(369,375),
+  I10_PR4   = c(376,382),  I10_PR5  = c(383,389),  I10_PR6  = c(390,396),
+  I10_PR7   = c(397,403),  I10_PR8  = c(404,410),  I10_PR9  = c(411,417),
+  I10_PR10  = c(418,424),  I10_PR11 = c(425,431),  I10_PR12 = c(432,438),
+  I10_PR13  = c(439,445),  I10_PR14 = c(446,452),  I10_PR15 = c(453,459),
+  I10_PR16  = c(460,466),  I10_PR17 = c(467,473),  I10_PR18 = c(474,480),
+  I10_PR19  = c(481,487),  I10_PR20 = c(488,494),  I10_PR21 = c(495,501),
+  I10_PR22  = c(502,508),  I10_PR23 = c(509,515),  I10_PR24 = c(516,522),
+  I10_PR25  = c(523,529)
+)
+
+# HCUP missing-value sentinels
+HOSP_NIS_NA <- c(-9999, -8888, -6666)
+STRATUM_NA  <- c(-999,  -888,  -666)
+DISCWT_NA   <- c(-99.9999999, -88.8888888, -66.6666666)
+
+# ── PCS target codes (both correct and miscoded sections) ─────────────────────
+pcs_correct  <- c("01QM0ZZ","01QM3ZZ","01QM4ZZ")
+pcs_miscoded <- c("00QM0ZZ","00QM3ZZ","00QM4ZZ")
+
+# ── Trauma classification regexes ─────────────────────────────────────────────
+# Applied to trimmed ICD-10-CM diagnosis fields.
+# A case is TRAUMATIC if ANY field matches ANY of these patterns.
+
+regex_facial_nerve_injury <- "^S045"          # Injury of facial nerve
+regex_facial_laceration   <- "^(S014|S018)"   # Open wound cheek/head
+regex_external_cause      <- "^[VWXYvwxy]"    # V01-Y99 external cause codes
+
+# Named list for per-flag reporting
+trauma_flags <- list(
+  "Facial nerve injury (S04.5)"          = regex_facial_nerve_injury,
+  "Facial laceration (S01.4/S01.8)"      = regex_facial_laceration,
+  "External cause code (V01\u2013Y99)"   = regex_external_cause
+)
+
+hcup_suppress_threshold <- 11L
+```
+
+# Data Extraction
+
+```{r extract}
+#| cache: false
+stopifnot(file.exists(nis_core_asc))
+
+message("Reading NIS_2023_Core.ASC (diagnosis + procedure fields)...")
+message("Estimated time: 5\u201310 minutes.")
+
+core <- read_fwf(
+  file          = nis_core_asc,
+  col_positions = col_spec,
+  col_types     = cols(
+    HOSP_NIS    = col_integer(),
+    NIS_STRATUM = col_integer(),
+    DISCWT      = col_double(),
+    .default    = col_character()
+  ),
+  na = c("", " ")
+)
+
+core <- core %>%
+  mutate(
+    HOSP_NIS    = if_else(HOSP_NIS    %in% HOSP_NIS_NA, NA_integer_, HOSP_NIS),
+    NIS_STRATUM = if_else(NIS_STRATUM %in% STRATUM_NA,  NA_integer_, NIS_STRATUM),
+    DISCWT      = if_else(DISCWT      %in% DISCWT_NA,   NA_real_,    DISCWT)
+  )
+
+dx_cols <- grep("^I10_DX[0-9]+$", names(core), value=TRUE)
+pr_cols <- grep("^I10_PR[0-9]+$", names(core), value=TRUE)
+core    <- core %>% mutate(across(all_of(c(dx_cols, pr_cols)), trimws))
+
+message("Rows loaded: ", format(nrow(core), big.mark=","))
+```
+
+# Identify and Classify the 57 Facial Nerve Repair Cases
+
+```{r classify}
+#| cache: false
+
+# ── Step 1: Flag facial nerve repair encounters ───────────────────────────────
+flag_any_code <- function(df, codes, fields) {
+  as.integer(rowSums(
+    sapply(fields, function(col) df[[col]] %in% codes, USE.NAMES=FALSE)
+  ) > 0)
+}
+
+core$has_correct_pcs  <- flag_any_code(core, pcs_correct,  pr_cols)
+core$has_miscoded_pcs <- flag_any_code(core, pcs_miscoded, pr_cols)
+core$facial_nerve_any <- as.integer(
+  (core$has_correct_pcs + core$has_miscoded_pcs) > 0
+)
+
+fn_cases <- core %>% filter(facial_nerve_any == 1L) %>%
+  mutate(pcs_group = case_when(
+    has_correct_pcs == 1L & has_miscoded_pcs == 1L ~ "Both sections",
+    has_correct_pcs == 1L                           ~ "PNS (correct, 01QM)",
+    has_miscoded_pcs == 1L                          ~ "CNS (miscoded, 00QM)"
+  ))
+
+cat(sprintf("Total facial nerve repair cases: %d\n", nrow(fn_cases)))
+
+# ── Step 2: Apply trauma flags (per-criterion, then union) ───────────────────
+flag_dx_regex <- function(df, regex, dx_cols) {
+  as.integer(rowSums(
+    sapply(dx_cols, function(col)
+      grepl(regex, df[[col]]), USE.NAMES=FALSE),
+    na.rm = TRUE
+  ) > 0)
+}
+
+for (flag_name in names(trauma_flags)) {
+  fn_cases[[paste0("trauma_", flag_name)]] <-
+    flag_dx_regex(fn_cases, trauma_flags[[flag_name]], dx_cols)
+}
+
+# Union: traumatic if ANY criterion met
+flag_cols <- paste0("trauma_", names(trauma_flags))
+fn_cases$is_traumatic <- as.integer(
+  rowSums(fn_cases[, flag_cols, drop=FALSE]) > 0
+)
+fn_cases$is_nontraumatic <- as.integer(fn_cases$is_traumatic == 0L)
+
+# ── Step 3: Report per-criterion and union counts ────────────────────────────
+cat("\n── Per-criterion trauma flags (may overlap) ───────────────\n")
+for (flag_name in names(trauma_flags)) {
+  n <- sum(fn_cases[[paste0("trauma_", flag_name)]])
+  cat(sprintf("  %-45s %d\n", flag_name, n))
+}
+cat(sprintf("\n  %-45s %d\n", "UNION (any criterion \u2014 unique cases):",
+            sum(fn_cases$is_traumatic)))
+cat(sprintf("  %-45s %d\n", "Non-traumatic:",
+            sum(fn_cases$is_nontraumatic)))
+```
+
+# Survey-Weighted Estimates
+
+```{r survey-estimates}
+#| cache: false
+options(survey.lonely.psu = "adjust")
+
+# Helper: weighted N from a subset of core rows
+weighted_n <- function(row_indices) {
+  if (length(row_indices) == 0L) return(0)
+  svy <- svydesign(
+    ids     = ~HOSP_NIS,
+    strata  = ~NIS_STRATUM,
+    weights = ~DISCWT,
+    data    = core[row_indices, c("HOSP_NIS","NIS_STRATUM","DISCWT")],
+    nest    = TRUE
+  )
+  round(sum(weights(svy)), 1)
+}
+
+fn_idx        <- which(core$facial_nerve_any == 1L)
+traumatic_idx <- which(core$facial_nerve_any == 1L &
+                       fn_cases$is_traumatic[match(seq_along(fn_idx), seq_along(fn_idx))] == 1L)
+
+# Rebuild flags on core for indexing
+core$is_traumatic_fn <- 0L
+core$is_traumatic_fn[fn_idx] <- fn_cases$is_traumatic
+
+traumatic_core_idx    <- which(core$facial_nerve_any == 1L & core$is_traumatic_fn == 1L)
+nontraumatic_core_idx <- which(core$facial_nerve_any == 1L & core$is_traumatic_fn == 0L)
+pns_traumatic_idx     <- which(core$has_correct_pcs  == 1L &
+                                core$has_miscoded_pcs == 0L &
+                                core$is_traumatic_fn  == 1L)
+cns_traumatic_idx     <- which(core$has_miscoded_pcs == 1L &
+                                core$has_correct_pcs  == 0L &
+                                core$is_traumatic_fn  == 1L)
+
+# Per-criterion weighted Ns
+per_criterion_wt <- sapply(names(trauma_flags), function(flag_name) {
+  flag_col <- paste0("trauma_", flag_name)
+  core[[paste0("tmp_", flag_col)]] <<- 0L
+  hit_idx <- fn_idx[fn_cases[[flag_col]] == 1L]
+  core[[paste0("tmp_", flag_col)]][hit_idx] <<- 1L
+  weighted_n(hit_idx)
+})
+# Cleanup temp columns
+for (flag_name in names(trauma_flags))
+  core[[paste0("tmp_trauma_", flag_name)]] <- NULL
+
+results <- tibble(
+  category        = c(
+    "All facial nerve repair (any code)",
+    "  PNS correctly coded (01QM)",
+    "  CNS miscoded (00QM)",
+    paste0("  Traumatic \u2014 ", names(trauma_flags)[1], " only"),
+    paste0("  Traumatic \u2014 ", names(trauma_flags)[2], " only"),
+    paste0("  Traumatic \u2014 ", names(trauma_flags)[3], " only"),
+    "TRAUMATIC \u2014 any criterion (unique, deduplicated)",
+    "  Of which: CNS-miscoded traumatic",
+    "  Of which: PNS-correct traumatic",
+    "NON-TRAUMATIC (no trauma criterion met)"
+  ),
+  unweighted_n    = c(
+    nrow(fn_cases),
+    sum(fn_cases$pcs_group == "PNS (correct, 01QM)"),
+    sum(fn_cases$pcs_group == "CNS (miscoded, 00QM)"),
+    sum(fn_cases[[paste0("trauma_", names(trauma_flags)[1])]]),
+    sum(fn_cases[[paste0("trauma_", names(trauma_flags)[2])]]),
+    sum(fn_cases[[paste0("trauma_", names(trauma_flags)[3])]]),
+    sum(fn_cases$is_traumatic),
+    length(cns_traumatic_idx),
+    length(pns_traumatic_idx),
+    sum(fn_cases$is_nontraumatic)
+  ),
+  weighted_n      = c(
+    weighted_n(fn_idx),
+    weighted_n(which(core$has_correct_pcs == 1L & core$has_miscoded_pcs == 0L)),
+    weighted_n(which(core$has_miscoded_pcs == 1L & core$has_correct_pcs == 0L)),
+    per_criterion_wt[1],
+    per_criterion_wt[2],
+    per_criterion_wt[3],
+    weighted_n(traumatic_core_idx),
+    weighted_n(cns_traumatic_idx),
+    weighted_n(pns_traumatic_idx),
+    weighted_n(nontraumatic_core_idx)
+  )
+)
+
+cat("\n── Survey-weighted results ─────────────────────────────────\n")
+print(results, n=Inf)
+```
+
+# Internal Display (Unsuppressed)
+
+```{r internal-display}
+#| cache: false
+results %>%
+  kable(
+    caption   = paste0("INTERNAL ONLY \u2014 Unsuppressed. HCUP NIS 2023. ",
+                       "Do not include in external output."),
+    col.names = c("Category","Unweighted N","Weighted N"),
+    format.args = list(big.mark=",")
+  ) %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),
+                full_width=TRUE) %>%
+  row_spec(which(grepl("^TRAUMATIC|^NON-TRAUMATIC|^All",
+                        results$category)),
+           bold=TRUE, background="#FFF3CD")
+```
+
+# Decision Summary
+
+```{r decision}
+#| cache: false
+traumatic_unwt <- sum(fn_cases$is_traumatic)
+traumatic_wt   <- weighted_n(traumatic_core_idx)
+nontraumatic_unwt <- sum(fn_cases$is_nontraumatic)
+nontraumatic_wt   <- weighted_n(nontraumatic_core_idx)
+total_unwt <- nrow(fn_cases)
+total_wt   <- weighted_n(fn_idx)
+pct_traumatic <- round(100 * traumatic_unwt / total_unwt, 1)
+
+cat(sprintf(paste0(
+  "── FINAL TRAUMATIC FACIAL NERVE REPAIR ESTIMATE (NIS 2023) ──\n\n",
+  "  Total facial nerve repair cases:     %d unweighted  /  %.1f weighted\n",
+  "  Traumatic (any criterion):           %d unweighted  /  %.1f weighted\n",
+  "  Non-traumatic:                       %d unweighted  /  %.1f weighted\n",
+  "  Traumatic fraction:                  %.1f%% of all cases\n\n",
+  "  NOTE: 'Any criterion' is the deduplicated union of S04.5,\n",
+  "  S01.4/S01.8, and external-cause V01-Y99. A patient carrying\n",
+  "  all three codes is counted once.\n"
+), total_unwt, total_wt,
+   traumatic_unwt, traumatic_wt,
+   nontraumatic_unwt, nontraumatic_wt,
+   pct_traumatic))
+```
+
+# Publication Table (HCUP Suppression Applied)
+
+```{r pub-table}
+#| cache: false
+suppress <- function(u, w) {
+  if      (u == 0L) paste0("0 (0)")
+  else if (u < hcup_suppress_threshold)
+    paste0("<11 (suppressed)")
+  else    paste0(format(u, big.mark=","), " (", format(round(w), big.mark=","), ")")
+}
+
+results_pub <- results %>%
+  rowwise() %>%
+  mutate(display = suppress(unweighted_n, weighted_n)) %>%
+  ungroup() %>%
+  select(category, display)
+
+gt_trauma <- results_pub %>%
+  setNames(c("Category", "Unweighted N (Weighted national estimate)")) %>%
+  gt() %>%
+  tab_header(
+    title    = md("**NIS 2023: Traumatic vs. Non-Traumatic Facial Nerve Repair**"),
+    subtitle = md("*Deduplicated case counts with survey-weighted national estimates*")
+  ) %>%
+  tab_footnote(footnote = md(paste0(
+    "Source: HCUP NIS 2023 Core File. 57 unweighted inpatient discharges with ",
+    "any facial nerve repair PCS code (01QM PNS or 00QM CNS) in I10_PR1\u2013I10_PR25. ",
+    "Traumatic classification: any of S04.5xxx (facial nerve injury), S01.4xxx/S01.8xxx ",
+    "(facial laceration), or V01\u2013Y99 (external cause) in any of I10_DX1\u2013I10_DX40. ",
+    "Union is deduplicated \u2014 each case counted once regardless of how many criteria met. ",
+    "Cells with unweighted N\u00a0<\u00a011 suppressed per HCUP DUA. ",
+    "Display format: unweighted N (weighted national estimate). ",
+    "Survey design: NIS_STRATUM strata, HOSP_NIS cluster, DISCWT weight, nest=TRUE."
+  ))) %>%
+  tab_style(
+    style     = list(cell_text(weight="bold"), cell_fill(color="#FFF3CD")),
+    locations = cells_body(rows = grepl("^TRAUMATIC|^NON-TRAUMATIC|^All",
+                                        results_pub$category))
+  ) %>%
+  tab_style(
+    style     = cell_fill(color="#EBF4FB"),
+    locations = cells_column_labels()
+  ) %>%
+  opt_table_font(font="Arial") %>%
+  tab_options(
+    table.font.size           = 11,
+    heading.title.font.size   = 12,
+    column_labels.font.weight = "bold",
+    table.border.top.style    = "solid",
+    table.border.bottom.style = "solid"
+  )
+
+gt_trauma
+```
+
+# Export Outputs
+
+```{r export}
+#| cache: false
+
+# ── Excel ─────────────────────────────────────────────────────────────────────
+wb      <- createWorkbook()
+title_s <- createStyle(fontSize=12, textDecoration="bold",
+                       halign="left", valign="center")
+head_s  <- createStyle(fontSize=11, textDecoration="bold",
+                       fgFill="#EBF4FB", halign="left",
+                       border="bottom", borderStyle="thin")
+bold_s  <- createStyle(fontSize=11, textDecoration="bold",
+                       fgFill="#FFF3CD", halign="left", wrapText=TRUE)
+body_s  <- createStyle(fontSize=11, halign="left",
+                       valign="top", wrapText=TRUE)
+note_s  <- createStyle(fontSize=9, fontColour="#555555",
+                       wrapText=TRUE, halign="left", valign="top")
+
+sht <- "Trauma Classification"
+addWorksheet(wb, sht)
+writeData(wb, sht,
+          "NIS 2023: Traumatic vs. Non-Traumatic Facial Nerve Repair",
+          startRow=1, startCol=1)
+addStyle(wb, sht, title_s, rows=1, cols=1)
+mergeCells(wb, sht, cols=1:2, rows=1)
+
+excel_tbl <- results_pub %>%
+  setNames(c("Category","Unweighted N (Weighted national estimate)"))
+writeData(wb, sht, excel_tbl, startRow=3, startCol=1, colNames=TRUE)
+addStyle(wb, sht, head_s, rows=3, cols=1:2, gridExpand=TRUE)
+
+for (i in seq_len(nrow(results_pub))) {
+  sty <- if (grepl("^TRAUMATIC|^NON-TRAUMATIC|^All", results_pub$category[i]))
+           bold_s else body_s
+  addStyle(wb, sht, sty, rows=i+3, cols=1:2, gridExpand=TRUE)
+}
+
+setColWidths(wb, sht, cols=1, widths=52)
+setColWidths(wb, sht, cols=2, widths=30)
+
+fn_row <- nrow(results_pub) + 5
+writeData(wb, sht, paste0(
+  "Source: HCUP NIS 2023. Traumatic classification: S04.5xxx OR S01.4/S01.8xxx ",
+  "OR V01\u2013Y99 in any of I10_DX1\u2013I10_DX40. Union deduplicated. ",
+  "Unweighted N <11 suppressed per HCUP DUA. ",
+  "Format: unweighted N (weighted national estimate). ",
+  "Survey: NIS_STRATUM/HOSP_NIS/DISCWT, nest=TRUE, lonely.psu=adjust."),
+  startRow=fn_row, startCol=1)
+mergeCells(wb, sht, cols=1:2, rows=fn_row)
+addStyle(wb, sht, note_s, rows=fn_row, cols=1)
+setRowHeights(wb, sht, rows=fn_row, heights=70)
+
+xlsx_path <- file.path(path.expand(output_dir),
+                       "NIS_2023_FacialNerve_TraumaClassification_v1.2.xlsx")
+saveWorkbook(wb, xlsx_path, overwrite=TRUE)
+message("Excel saved: ", xlsx_path)
+
+# ── Word ──────────────────────────────────────────────────────────────────────
+save_gt_to_word <- function(gt_tbl, filename) {
+  filepath <- file.path(path.expand(output_dir), filename)
+  gt::gtsave(gt_tbl, filename=filepath)
+  message("Word saved: ", filename)
+}
+
+save_gt_to_word(gt_trauma,
+                "Table_NIS2023_FacialNerve_TraumaClassification_v1.2.docx")
+```
+
+# Session Info
+
+```{r session}
+sessionInfo()
+```
+
+<!--
+==============================================================================
+VERSION HISTORY
+==============================================================================
+v1.2  2026-04-28  Precise deduplicated traumatic case count for the 57
+                  inpatient facial nerve repair cases identified in v1.0
+                  and confirmed in v1.1.
+
+                  Trauma classification criteria (union, any one sufficient):
+                    S04.5xxx  \u2014 Injury of facial nerve
+                    S01.4xxx  \u2014 Open wound, cheek / temporomandibular area
+                    S01.8xxx  \u2014 Open wound, other parts of head
+                    V01\u2013Y99   \u2014 External cause of morbidity codes
+
+                  Each criterion also reported individually (may overlap).
+                  Union is deduplicated: each case counted once.
+
+                  External-cause sweep (V01\u2013Y99) is the most sensitive net
+                  and may identify traumatic cases where the specific nerve
+                  injury code was omitted but the injury mechanism was coded.
+
+                  Outputs: gt publication table, Excel, Word.
+                  Inherits all v1.0/v1.1 conventions: read_fwf from
+                  NIS_2023_Core.ASC, column positions from
+                  StataLoad_NIS_2023_Core.Do (12/10/2025), DISCWT no
+                  scaling, survey design NIS_STRATUM/HOSP_NIS/DISCWT,
+                  nest=TRUE, lonely.psu=adjust. HCUP DUA <11 suppression.
+==============================================================================
+-->
