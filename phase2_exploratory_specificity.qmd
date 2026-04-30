@@ -1,0 +1,481 @@
+---
+title: "Exploratory: Group 1 Specificity Tests"
+author: "Solomon Johnson"
+date: "`r Sys.Date()`"
+output-file: "phase2_exploratory_specificity.html"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+  freeze: auto
+---
+
+<!--
+============================================================
+EXPLORATORY ANALYSIS — NOT PART OF VERSIONED PIPELINE
+Two scratch tests run against v1.7 cohort (no re-extraction):
+
+  TEST 1 — Strict anatomic definition
+           Restricts wound codes to S01.1/S01.3/S01.4/S01.5/S01.81
+           (anatomically concordant with facial nerve territory),
+           drops S01.0 (scalp), S01.2 (nose), S01.9 (unspecified),
+           and all S11.* (neck). Restricts to 7th char A only
+           (drops 7th char D subsequent encounters). Excludes
+           parotid/cranial nerve neoplasm + surgical complication.
+
+  TEST 2 — Neoplasm/iatrogenic exclusion only
+           Keeps the v1.7 primary definition intact, only removes
+           encounters carrying parotid/cranial-nerve neoplasm
+           (C07, D11.0, C49.0, D33.3, C72.4) or surgical complication
+           (T85.4*, Y83.*) codes. Tests whether removing the
+           single largest false-positive category alone changes
+           the headline numbers.
+
+This file is exploratory. Findings inform a future formal version
+bump (e.g. v2.0 with strict primary, or addition of Sensitivity
+Analysis 4 to the main pipeline) but do not modify any existing
+output.
+============================================================
+-->
+
+```{r setup}
+#| cache: false
+library(haven);     library(dplyr);     library(purrr);    library(furrr)
+library(future);    library(tidyr);     library(stringr);  library(survey)
+library(knitr);     library(kableExtra);library(gt)
+
+# ── File paths — identical to v1.7 ───────────────────────────────────────────
+d16_23 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/NASS_HCUP Database/RAW Data Files HNASS"
+d21 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2021"
+d22 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2022"
+d23 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2023"
+
+enc_files <- list(
+  "2016"=file.path(d16_23,"NASS_2016_Encounter-002.dta"),
+  "2017"=file.path(d16_23,"NASS_2017_Encounter-003.dta"),
+  "2018"=file.path(d16_23,"NASS_2018_Encounter-001.dta"),
+  "2019"=file.path(d16_23,"NASS_2019_Encounter-005.dta"),
+  "2020"=file.path(d16_23,"NASS_2020_Encounter.dta"),
+  "2021"=file.path(d21,   "NASS_2021_Encounter.dta"),
+  "2022"=file.path(d22,   "NASS_2022_Encounter.dta"),
+  "2023"=file.path(d23,   "NASS_2023_Encounter.dta")
+)
+hosp_files <- list(
+  "2016"=file.path(d16_23,"NASS_2016_Hospital.dta"),
+  "2017"=file.path(d16_23,"NASS_2017_Hospital.dta"),
+  "2018"=file.path(d16_23,"NASS_2018_Hospital.dta"),
+  "2019"=file.path(d16_23,"NASS_2019_Hospital.dta"),
+  "2020"=file.path(d16_23,"NASS_2020_Hospital.dta"),
+  "2021"=file.path(d21,   "NASS_2021_Hospital.dta"),
+  "2022"=file.path(d22,   "NASS_2022_Hospital.dta"),
+  "2023"=file.path(d23,   "NASS_2023_Hospital.dta")
+)
+
+# ── Code constants — identical to v1.7 ───────────────────────────────────────
+cpt_codes         <- c("64864","64865","64885","64886")
+dx_stem           <- "S045"
+s01_stem          <- "S01"
+s11_stem          <- "S11"
+ext_cause_pattern <- "^(W2[5-7]|W45|X99|Y28|V[0-9]{2})"
+not_sequela       <- function(cd) !str_ends(cd, "S")
+
+# ── Extraction function — v1.7 logic + dx_raw carried forward ────────────────
+extract_year_expl <- function(year, enc_fp, hosp_fp) {
+  message("  Loading: ", year)
+  if (!file.exists(enc_fp))  { warning("Missing: ", enc_fp);  return(NULL) }
+  enc  <- read_dta(enc_fp)
+  ec   <- names(enc)
+  get_col <- function(pat) grep(pat, ec, value=TRUE, ignore.case=TRUE)[1]
+  dx_cols   <- grep("^i10_dx",   ec, value=TRUE, ignore.case=TRUE)
+  cpt_cols  <- grep("^cpt[0-9]", ec, value=TRUE, ignore.case=TRUE)
+  discwt_col <- get_col("^discwt$")
+  hosp_id_e  <- get_col("^hosp_nass$")
+
+  # v1.7 flags
+  dx_s045  <- rowSums(sapply(dx_cols, function(col) {
+    cd <- trimws(as.character(enc[[col]]))
+    str_starts(cd, dx_stem) & not_sequela(cd) })) > 0
+  s01_flag <- rowSums(sapply(dx_cols, function(col) {
+    cd <- trimws(as.character(enc[[col]]))
+    str_starts(cd, s01_stem) & not_sequela(cd) })) > 0
+  s11_flag <- rowSums(sapply(dx_cols, function(col) {
+    cd <- trimws(as.character(enc[[col]]))
+    str_starts(cd, s11_stem) & not_sequela(cd) })) > 0
+  ext_flag <- rowSums(sapply(dx_cols, function(col)
+    str_detect(trimws(as.character(enc[[col]])), ext_cause_pattern))) > 0
+  cpt_flag <- rowSums(sapply(cpt_cols, function(col)
+    trimws(as.character(enc[[col]])) %in% cpt_codes)) > 0
+
+  crit_a <- dx_s045 & (s01_flag | s11_flag)
+  crit_b <- cpt_flag & (s01_flag | s11_flag)
+  g1     <- crit_a | crit_b
+  g2     <- cpt_flag & g1
+  keep   <- g1
+  if (sum(keep) == 0) return(NULL)
+
+  # Carry raw dx codes for post-hoc specificity tests
+  clean_codes <- function(mat) {
+    apply(mat, 1, function(row) {
+      codes <- trimws(as.character(row))
+      codes <- codes[nzchar(codes) & codes != "." & !is.na(codes) & codes != "0"]
+      paste(codes, collapse="|")
+    })
+  }
+  dx_raw_col <- clean_codes(enc[keep, dx_cols, drop=FALSE])
+
+  tibble(
+    year       = year,
+    had_repair = as.integer(g2[keep]),
+    discwt     = if (!is.na(discwt_col))
+                   as.numeric(enc[[discwt_col]][keep]) else rep(1, sum(keep)),
+    hosp_id    = if (!is.na(hosp_id_e))
+                   as.character(enc[[hosp_id_e]][keep])
+                 else as.character(seq_len(sum(keep))),
+    flag_crit_a = crit_a[keep],
+    flag_crit_b = crit_b[keep],
+    flag_extcause = ext_flag[keep],
+    dx_raw     = dx_raw_col
+  )
+}
+
+# ── Run extraction (parallel) ─────────────────────────────────────────────────
+message("Starting extraction for exploratory specificity tests...")
+plan(multisession, workers = max(1, availableCores()-1))
+enc_all <- bind_rows(Filter(Negate(is.null),
+  future_map2(names(enc_files), enc_files,
+    ~ extract_year_expl(.x, .y, hosp_files[[.x]]),
+    .options = furrr_options(seed=TRUE))))
+plan(sequential)
+
+message("enc_all loaded: ", nrow(enc_all), " rows")
+
+# ── Reference numbers from v1.7 primary ──────────────────────────────────────
+primary_n_uw  <- nrow(enc_all)
+primary_n_w   <- round(sum(enc_all$discwt, na.rm=TRUE))
+primary_g2_uw <- sum(enc_all$had_repair == 1)
+primary_g2_w  <- round(sum(enc_all$discwt[enc_all$had_repair==1], na.rm=TRUE))
+primary_rate  <- round(100 * primary_g2_w / primary_n_w, 1)
+
+cat("v1.7 primary cohort: ", format(primary_n_uw, big.mark=","),
+    " unweighted, ", format(primary_n_w, big.mark=","), " weighted\n",
+    "Group 2: ", primary_g2_uw, " unweighted (",
+    primary_rate, "% repair rate)\n", sep="")
+```
+
+# Test 1 — Strict Anatomic Definition
+
+```{r test1-strict-anatomic}
+#| cache: false
+
+# ── Helper: parse pipe-joined dx_raw into per-row code list ───────────────────
+parse_codes <- function(s) strsplit(s, "\\|")[[1]]
+
+# ── Strict-anatomic flags ─────────────────────────────────────────────────────
+# Anatomically concordant wound codes only (drop S01.0 scalp, S01.2 nose,
+# S01.9 unspecified, all S11.* neck)
+anatomic_wound_re <- "^S01[13458]"   # matches S011, S013, S014, S015, S018
+
+# 7th character A only (drop D subsequent encounters)
+not_acute <- function(cd) !str_ends(cd, "A")
+
+is_strict_acute_s045 <- function(codes) {
+  any(str_starts(codes, "S045") & str_ends(codes, "A"))
+}
+is_strict_anatomic_wound <- function(codes) {
+  any(str_detect(codes, anatomic_wound_re) & str_ends(codes, "A"))
+}
+
+# ── Neoplasm and iatrogenic exclusion regex ──────────────────────────────────
+# C07*    parotid malignant neoplasm
+# D11.0   benign parotid neoplasm
+# C49.0*  connective tissue head/face/neck
+# D33.3   benign cranial nerve neoplasm
+# C72.4*  malignant cranial nerve
+# T85.4*  mechanical complication of prosthetic device
+# Y83*    surgical operation as cause of abnormal reaction
+exclusion_re <- "^(C07|D110|C490|D333|C724|T854|Y83)"
+
+is_excluded <- function(codes) {
+  any(str_detect(codes, exclusion_re))
+}
+
+# ── Apply tests row-wise ──────────────────────────────────────────────────────
+message("Parsing dx_raw across ", nrow(enc_all), " rows...")
+code_lists <- lapply(enc_all$dx_raw, parse_codes)
+
+flag_strict_s045  <- vapply(code_lists, is_strict_acute_s045,    logical(1))
+flag_strict_wound <- vapply(code_lists, is_strict_anatomic_wound, logical(1))
+flag_excluded     <- vapply(code_lists, is_excluded,             logical(1))
+
+# Strict Criterion A: acute S04.5 + anatomic wound
+strict_crit_a <- flag_strict_s045 & flag_strict_wound
+
+# Strict Criterion B: had repair CPT + anatomic wound
+strict_crit_b <- (enc_all$had_repair == 1) & flag_strict_wound
+
+# Strict Group 1 = (A or B) AND not excluded
+strict_g1 <- (strict_crit_a | strict_crit_b) & !flag_excluded
+
+# Test 1 cohort
+t1 <- enc_all[strict_g1, ]
+t1_n_uw  <- nrow(t1)
+t1_n_w   <- round(sum(t1$discwt, na.rm=TRUE))
+t1_g2_uw <- sum(t1$had_repair == 1)
+t1_g2_w  <- round(sum(t1$discwt[t1$had_repair==1], na.rm=TRUE))
+t1_rate  <- if (t1_n_w > 0) round(100 * t1_g2_w / t1_n_w, 1) else NA_real_
+
+# ── Loss accounting ───────────────────────────────────────────────────────────
+loss_to_anatomic_wound <- sum(!flag_strict_wound)
+loss_to_acute_only     <- sum(flag_strict_wound & !flag_strict_s045 &
+                               enc_all$had_repair == 0)
+loss_to_exclusion      <- sum((strict_crit_a | strict_crit_b) & flag_excluded)
+
+cat("\n=== TEST 1 — Strict Anatomic Definition ===\n",
+    "Cohort: ", format(t1_n_uw, big.mark=","), " unweighted, ",
+                format(t1_n_w,  big.mark=","), " weighted\n",
+    "Group 2: ", t1_g2_uw, " unweighted (", t1_rate, "% repair rate)\n",
+    "Excluded by neoplasm/iatrogenic codes: ", loss_to_exclusion, " rows\n",
+    "Excluded by anatomic-wound restriction: ",
+        primary_n_uw - sum(strict_crit_a | strict_crit_b), " rows\n", sep="")
+
+# ── Side-by-side summary table ────────────────────────────────────────────────
+test1_summary <- tibble(
+  Metric = c(
+    "Group 1 unweighted N",
+    "Group 1 weighted N",
+    "Group 2 unweighted N",
+    "Group 2 weighted N",
+    "Repair rate (weighted)",
+    "Cohort \u0394 vs primary (unweighted)",
+    "Excluded by anatomic-wound restriction",
+    "Excluded by neoplasm/iatrogenic codes"
+  ),
+  `v1.7 Primary` = c(
+    format(primary_n_uw, big.mark=","),
+    format(primary_n_w,  big.mark=","),
+    format(primary_g2_uw,big.mark=","),
+    format(primary_g2_w, big.mark=","),
+    paste0(primary_rate, "%"),
+    "(reference)",
+    "(reference)",
+    "(reference)"
+  ),
+  `Test 1: Strict` = c(
+    format(t1_n_uw, big.mark=","),
+    format(t1_n_w,  big.mark=","),
+    format(t1_g2_uw,big.mark=","),
+    format(t1_g2_w, big.mark=","),
+    paste0(t1_rate, "%"),
+    paste0(sprintf("%+d", t1_n_uw - primary_n_uw),
+           " (", sprintf("%+.1f", 100*(t1_n_uw-primary_n_uw)/primary_n_uw),
+           "%)"),
+    paste0(primary_n_uw - sum(strict_crit_a | strict_crit_b), " rows"),
+    paste0(loss_to_exclusion, " rows")
+  )
+)
+
+test1_summary %>%
+  kable(caption = paste0(
+    "Test 1: Strict anatomic-wound definition + neoplasm/iatrogenic exclusion. ",
+    "Wound codes restricted to S01.1, S01.3, S01.4, S01.5, S01.81 ",
+    "(facial-nerve territory) with 7th char A only. Exclusion codes: ",
+    "C07, D11.0, C49.0, D33.3, C72.4 (parotid/cranial nerve neoplasm); ",
+    "T85.4*, Y83.* (surgical complication).")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+```
+
+# Test 2 — Neoplasm/Iatrogenic Exclusion Only
+
+```{r test2-exclusion-only}
+#| cache: false
+# Same v1.7 definition, only remove encounters carrying parotid/cranial-nerve
+# neoplasm or surgical-complication codes.
+
+t2_keep <- !flag_excluded
+t2 <- enc_all[t2_keep, ]
+t2_n_uw  <- nrow(t2)
+t2_n_w   <- round(sum(t2$discwt, na.rm=TRUE))
+t2_g2_uw <- sum(t2$had_repair == 1)
+t2_g2_w  <- round(sum(t2$discwt[t2$had_repair==1], na.rm=TRUE))
+t2_rate  <- if (t2_n_w > 0) round(100 * t2_g2_w / t2_n_w, 1) else NA_real_
+
+# Breakdown of which exclusion codes hit
+hits <- list(
+  `C07 parotid malignant`   = sum(sapply(code_lists,
+    function(cs) any(str_starts(cs, "C07")))),
+  `D11.0 parotid benign`     = sum(sapply(code_lists,
+    function(cs) any(str_starts(cs, "D110")))),
+  `C49.0 connective tissue head/neck` = sum(sapply(code_lists,
+    function(cs) any(str_starts(cs, "C490")))),
+  `D33.3 cranial nerve benign neoplasm` = sum(sapply(code_lists,
+    function(cs) any(str_starts(cs, "D333")))),
+  `C72.4 cranial nerve malignant`       = sum(sapply(code_lists,
+    function(cs) any(str_starts(cs, "C724")))),
+  `T85.4* surgical mesh complication`   = sum(sapply(code_lists,
+    function(cs) any(str_starts(cs, "T854")))),
+  `Y83.* surgical complication`          = sum(sapply(code_lists,
+    function(cs) any(str_starts(cs, "Y83"))))
+)
+
+cat("\n=== TEST 2 — Neoplasm/Iatrogenic Exclusion Only ===\n",
+    "Cohort: ", format(t2_n_uw, big.mark=","), " unweighted, ",
+                format(t2_n_w,  big.mark=","), " weighted\n",
+    "Group 2: ", t2_g2_uw, " unweighted (", t2_rate, "% repair rate)\n",
+    "Total rows excluded: ", primary_n_uw - t2_n_uw, "\n", sep="")
+
+cat("\nHits per exclusion code (rows can match multiple):\n")
+for (nm in names(hits)) cat("  ", nm, ": ", hits[[nm]], "\n", sep="")
+
+test2_summary <- tibble(
+  Metric = c(
+    "Group 1 unweighted N",
+    "Group 1 weighted N",
+    "Group 2 unweighted N",
+    "Group 2 weighted N",
+    "Repair rate (weighted)",
+    "Cohort \u0394 vs primary (unweighted)",
+    "Total rows excluded"
+  ),
+  `v1.7 Primary` = c(
+    format(primary_n_uw, big.mark=","),
+    format(primary_n_w,  big.mark=","),
+    format(primary_g2_uw,big.mark=","),
+    format(primary_g2_w, big.mark=","),
+    paste0(primary_rate, "%"),
+    "(reference)",
+    "(reference)"
+  ),
+  `Test 2: Exclusion-only` = c(
+    format(t2_n_uw, big.mark=","),
+    format(t2_n_w,  big.mark=","),
+    format(t2_g2_uw,big.mark=","),
+    format(t2_g2_w, big.mark=","),
+    paste0(t2_rate, "%"),
+    paste0(sprintf("%+d", t2_n_uw - primary_n_uw),
+           " (", sprintf("%+.1f", 100*(t2_n_uw-primary_n_uw)/primary_n_uw),
+           "%)"),
+    paste0(primary_n_uw - t2_n_uw, " rows")
+  )
+)
+
+test2_summary %>%
+  kable(caption = paste0(
+    "Test 2: v1.7 primary definition with parotid/cranial-nerve neoplasm and ",
+    "surgical-complication exclusions only. Anatomic wound restriction NOT applied. ",
+    "Tests whether removing the largest false-positive category alone moves ",
+    "the headline numbers.")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+
+# Per-code hits table
+hits_tbl <- tibble(
+  `Exclusion code`           = names(hits),
+  `Rows hit (may overlap)`   = unlist(hits)
+)
+hits_tbl %>%
+  kable(caption = "Test 2: per-code hit counts. Rows may match more than one exclusion code.") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+```
+
+# Combined Comparison
+
+```{r combined-summary}
+#| cache: false
+combined <- tibble(
+  Metric = c("Group 1 unweighted N",
+             "Group 1 weighted N",
+             "Group 2 unweighted N",
+             "Group 2 weighted N",
+             "Repair rate (weighted)"),
+  `v1.7 Primary` = c(format(primary_n_uw, big.mark=","),
+                     format(primary_n_w,  big.mark=","),
+                     format(primary_g2_uw,big.mark=","),
+                     format(primary_g2_w, big.mark=","),
+                     paste0(primary_rate, "%")),
+  `Test 1: Strict` = c(format(t1_n_uw, big.mark=","),
+                       format(t1_n_w,  big.mark=","),
+                       format(t1_g2_uw,big.mark=","),
+                       format(t1_g2_w, big.mark=","),
+                       paste0(t1_rate, "%")),
+  `Test 2: Exclusion only` = c(format(t2_n_uw, big.mark=","),
+                                format(t2_n_w,  big.mark=","),
+                                format(t2_g2_uw,big.mark=","),
+                                format(t2_g2_w, big.mark=","),
+                                paste0(t2_rate, "%"))
+)
+
+combined %>%
+  kable(caption = "Side-by-side comparison: v1.7 primary vs Test 1 (strict) vs Test 2 (exclusion-only).") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) %>%
+  row_spec(5, bold = TRUE, background = "#EBF4FB")
+```
+
+# Interpretation Notes
+
+```{r interpretation-notes}
+#| cache: false
+#| echo: false
+
+cat("Interpretation guide:\n\n")
+
+# Test 1 interpretation
+delta_t1   <- t1_n_uw - primary_n_uw
+rate_t1    <- t1_rate - primary_rate
+cat("TEST 1 (strict anatomic): cohort change = ", sprintf("%+d", delta_t1),
+    " unweighted (", sprintf("%+.1f", 100*delta_t1/primary_n_uw), "%); ",
+    "repair rate change = ", sprintf("%+.1f", rate_t1), " percentage points.\n",
+    sep="")
+
+if (abs(rate_t1) < 3) {
+  cat("  → Repair rate moved <3 pp. Strict definition produces similar rate.\n",
+      "    v1.7 primary is robust to anatomic restriction.\n", sep="")
+} else if (rate_t1 > 0) {
+  cat("  → Repair rate increased substantially under strict definition.\n",
+      "    Cases dropped by anatomic restriction were enriched for non-repair.\n",
+      "    Suggests S01.0/S01.9/S11.* (less anatomic-specific wounds) carry\n",
+      "    more conservatively-managed cases.\n", sep="")
+} else {
+  cat("  → Repair rate decreased substantially under strict definition.\n",
+      "    Investigate; this is unexpected.\n", sep="")
+}
+
+cat("\n")
+
+# Test 2 interpretation
+delta_t2   <- t2_n_uw - primary_n_uw
+rate_t2    <- t2_rate - primary_rate
+cat("TEST 2 (exclusion only): cohort change = ", sprintf("%+d", delta_t2),
+    " unweighted (", sprintf("%+.1f", 100*delta_t2/primary_n_uw), "%); ",
+    "repair rate change = ", sprintf("%+.1f", rate_t2), " percentage points.\n",
+    sep="")
+
+if (abs(delta_t2) < 10) {
+  cat("  → Few rows hit the exclusion criteria. Neoplasm/iatrogenic\n",
+      "    contamination of the v1.7 cohort is minimal.\n", sep="")
+} else {
+  cat("  → ", abs(delta_t2), " rows excluded. Worth promoting to a\n",
+      "    permanent exclusion in a future v2.0.\n", sep="")
+}
+```
+
+# Decision Framework
+
+The numbers above feed three possible next steps:
+
+1. **If Test 1 produces results within 2-3 percentage points of v1.7** for both cohort size proportionally and repair rate, the current definition is robust to anatomic tightening — no change needed; document as a sensitivity in methods.
+
+2. **If Test 1 differs meaningfully but Test 2 alone produces no change** — the anatomic-wound restriction is doing the work, not the neoplasm/iatrogenic exclusion. Decide whether to elevate strict definition to primary in v2.0 or report as a permanent Sensitivity Analysis 4.
+
+3. **If Test 2 alone meaningfully shifts numbers** — the v1.7 cohort has substantive neoplasm/iatrogenic contamination. Add the exclusion codes to the extraction function and re-extract for v2.0.
