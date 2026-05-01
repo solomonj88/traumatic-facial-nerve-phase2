@@ -2829,12 +2829,12 @@ if (!nis_available) {
   nis_g2     <- nis_pcs & nis_g1
   nis_g3     <- nis_g1 & !nis_g2
 
-  # ── Add flags as columns so svydesign can access them ────────────────────
-  nis$nis_g1 <- as.integer(nis_g1)
-  nis$nis_g2 <- as.integer(nis_g2)
-  nis$nis_g3 <- as.integer(nis_g3)
+# ── Add flags as columns so svydesign can access them ────────────────────
+  nis$flag_g1 <- as.integer(nis_g1)
+  nis$flag_g2 <- as.integer(nis_g2)
+  nis$flag_g3 <- as.integer(nis_g3)
 
-  # ── Compute weighted estimates with proper survey design ─────────────────
+  # ── Compute weighted estimates with proper survey design ──────────────────
   options(survey.lonely.psu = "adjust")
   nis_design <- svydesign(
     ids     = ~HOSP_NIS,
@@ -2844,15 +2844,16 @@ if (!nis_available) {
     nest    = TRUE
   )
 
-  nis_total_unw  <- sum(nis_g1)
-  nis_total_w    <- round(as.numeric(coef(svytotal(~nis_g1, nis_design))))
-  nis_g2_unw     <- sum(nis_g2)
-  nis_g2_w       <- round(as.numeric(coef(svytotal(~nis_g2, nis_design))))
-  nis_g3_unw     <- sum(nis_g3)
-  nis_g3_w       <- round(as.numeric(coef(svytotal(~nis_g3, nis_design))))
+nis_total_unw  <- sum(nis_g1,  na.rm=TRUE)
+  nis_g2_unw     <- sum(nis_g2,  na.rm=TRUE)
+  nis_g3_unw     <- sum(nis_g3,  na.rm=TRUE)
+
+  nis_total_w    <- round(sum(nis$DISCWT[nis_g1],  na.rm=TRUE))
+  nis_g2_w       <- round(sum(nis$DISCWT[nis_g2],  na.rm=TRUE))
+  nis_g3_w       <- round(sum(nis$DISCWT[nis_g3],  na.rm=TRUE))
+
   nis_rate_w     <- if (nis_total_w > 0)
                       round(100 * nis_g2_w / nis_total_w, 1) else NA_real_
-
   # Criterion contributions
   nis_a_only <- sum( nis_crit_a & !nis_crit_b & !nis_excl)
   nis_b_only <- sum(!nis_crit_a &  nis_crit_b & !nis_excl)
