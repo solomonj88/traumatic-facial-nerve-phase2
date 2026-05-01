@@ -2921,6 +2921,14 @@ if (!nis_available) {
   nass_2023_rate   <- if (nass_2023_g1_w > 0)
     round(100 * nass_2023_g2_w / nass_2023_g1_w, 1) else NA_real_
 
+  # ── DIAGNOSTIC: print group counts so they appear in render log ─────────
+  cat("\n========== NIS CHUNK DIAGNOSTIC ==========\n")
+  cat("nis_total_unw:", nis_total_unw, "\n")
+  cat("nis_total_w:  ", nis_total_w,   "\n")
+  cat("nis_g2_unw:   ", nis_g2_unw,    "\n")
+  cat("nis_g2_w:     ", nis_g2_w,      "\n")
+  cat("==========================================\n\n")
+
   nis_parallel_results <- tibble(
     Metric = c(
       "Group 1 unweighted N",
@@ -2967,12 +2975,13 @@ if (!nis_available) {
 nis_parallel_results %>%
   kable(caption = paste0(
     "NIS 2023 vs NASS 2023 \u2014 parallel cohort comparison applying ",
-    "the v1.8 inclusion logic to both databases. NIS extraction includes ",
-    "both PNS-correctly-coded (01QM) and CNS-miscoded (00QM) facial nerve ",
-    "repair PCS codes per the v1.1 NIS confirmation analysis. ",
-    "External cause codes are not used for inclusion in either database. ",
-    "Per HCUP DUA, unweighted N <11 are flagged as suppressed for any ",
-    "external publication."),
+    "the v2.0 inclusion logic to both databases. Group 1 = (Crit A: S04.5 ",
+    "+ S01/S11) OR (Crit B: facial nerve repair PCS + S01/S11), where the ",
+    "PCS code list includes 01QM (PNS Repair), 00QM (CNS-miscoded Repair), ",
+    "and 01UM (Supplement / nerve graft, included for forward compatibility ",
+    "with future NIS years). External cause codes are not used for ",
+    "inclusion in either database. Per HCUP DUA, unweighted N <11 are ",
+    "flagged as suppressed for any external publication."),
     format.args = list(big.mark=",")) %>%
   kable_styling(bootstrap_options = c("striped","hover","condensed"),
                 full_width = TRUE) %>%
@@ -3126,42 +3135,36 @@ cat(draft_methods)
 
 ```{r copy-to-drive}
 #| cache: false
-# Copy the rendered HTML and the .qmd source into the Quarto Versions subfolder.
 qmd_basename  <- "nass_phase2_analysis_2_0.qmd"
 html_basename <- "nass_phase2_analysis_2_0.html"
+qmd_dir       <- file.path(onedrive_base, "Quarto Versions")
 
-# HTML: search common locations for the rendered output
-html_candidates <- c(
-  file.path(getwd(),     html_basename),
-  file.path("~/Downloads", html_basename),
-  file.path("~/Documents", html_basename)
-)
-html_src <- html_candidates[file.exists(path.expand(html_candidates))][1]
-if (!is.na(html_src)) {
-  file.copy(path.expand(html_src),
-            file.path(qmd_dir, html_basename),
-            overwrite=TRUE)
-  message("HTML copied from: ", html_src)
+# HTML copy — only if not already in destination
+html_src <- file.path(getwd(), html_basename)
+html_dst <- file.path(qmd_dir, html_basename)
+if (file.exists(html_src)) {
+  if (normalizePath(html_src) != normalizePath(html_dst)) {
+    file.copy(html_src, html_dst, overwrite=TRUE)
+    message("HTML copied to Quarto Versions.")
+  } else {
+    message("HTML already in Quarto Versions — skipping.")
+  }
 } else {
-  message("HTML not yet available; render the document and re-run this chunk.")
+  message("HTML not found at: ", html_src)
 }
 
-# QMD source: only copy if source and destination are different paths
+# QMD copy — only if source and destination differ
 qmd_src <- file.path(getwd(), qmd_basename)
 qmd_dst <- file.path(qmd_dir, qmd_basename)
 if (file.exists(qmd_src) &&
     normalizePath(qmd_src) != normalizePath(qmd_dst)) {
   file.copy(qmd_src, qmd_dst, overwrite=TRUE)
-  message("QMD copied from: ", qmd_src)
+  message("QMD copied to Quarto Versions.")
 } else {
   message("QMD already in Quarto Versions — skipping self-copy.")
 }
 
-message("\nAll outputs saved under: ", output_dir)
-message("  Figures      : ", fig_dir)
-message("  Excel        : ", xlsx_dir)
-message("  Word Tables  : ", word_dir)
-message("  Quarto       : ", qmd_dir)
+message("Outputs under: ", onedrive_base)
 ```
 
 # Session Info
