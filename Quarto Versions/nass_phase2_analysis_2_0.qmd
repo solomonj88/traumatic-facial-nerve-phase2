@@ -2818,17 +2818,19 @@ if (!nis_available) {
   nis_s11     <- any_match_start(nis, nis_dx_cols, "S11")
   nis_pcs     <- any_match_exact(nis, nis_pr_cols, facial_nerve_repair_pcs)
 
-  # Neoplasm/iatrogenic exclusion (v1.8)
+  # Neoplasm/iatrogenic exclusion (v1.8) — NA-safe
   nis_excl <- rowSums(sapply(nis_dx_cols, function(c) {
     cd <- trimws(as.character(nis[[c]]))
-    str_detect(cd, "^(C07|D110|C490|D333|C724|T854|Y83)") & nzchar(cd)
-  })) > 0
+    !is.na(cd) & nzchar(cd) &
+      str_detect(cd, "^(C07|D110|C490|D333|C724|T854|Y83)")
+  }), na.rm=TRUE) > 0
 
-  # External cause flag (informational, not used for inclusion)
+  # External cause flag (informational, not used for inclusion) — NA-safe
   nis_ext <- rowSums(sapply(nis_dx_cols, function(c) {
     cd <- trimws(as.character(nis[[c]]))
-    str_detect(cd, "^(W2[5-7]|W45|X99|Y28|V[0-9]{2})")
-  })) > 0
+    !is.na(cd) & nzchar(cd) &
+      str_detect(cd, "^(W2[5-7]|W45|X99|Y28|V[0-9]{2})")
+  }), na.rm=TRUE) > 0
 
   # Phase 2 v1.7 inclusion logic adapted for ICD-10-PCS:
   # Criterion A: S04.5 + (S01 OR S11)
@@ -2921,12 +2923,28 @@ if (!nis_available) {
   nass_2023_rate   <- if (nass_2023_g1_w > 0)
     round(100 * nass_2023_g2_w / nass_2023_g1_w, 1) else NA_real_
 
-  # ── DIAGNOSTIC: print group counts so they appear in render log ─────────
+  # ── DIAGNOSTIC: print full chunk state so we can see what render sees ────
   cat("\n========== NIS CHUNK DIAGNOSTIC ==========\n")
-  cat("nis_total_unw:", nis_total_unw, "\n")
-  cat("nis_total_w:  ", nis_total_w,   "\n")
-  cat("nis_g2_unw:   ", nis_g2_unw,    "\n")
-  cat("nis_g2_w:     ", nis_g2_w,      "\n")
+  cat("getwd():           ", getwd(),                          "\n")
+  cat("nis_core_asc:      ", nis_core_asc,                      "\n")
+  cat("file.exists():     ", file.exists(nis_core_asc),         "\n")
+  cat("nrow(nis):         ", nrow(nis),                         "\n")
+  cat("DISCWT class:      ", class(nis$DISCWT),                 "\n")
+  cat("DISCWT NA count:   ", sum(is.na(nis$DISCWT)),            "\n")
+  cat("Any S04.5 hits:    ", sum(nis_dx_s045, na.rm=TRUE),      "\n")
+  cat("Any S01 hits:      ", sum(nis_s01, na.rm=TRUE),          "\n")
+  cat("Any S11 hits:      ", sum(nis_s11, na.rm=TRUE),          "\n")
+  cat("Any PCS hits:      ", sum(nis_pcs, na.rm=TRUE),          "\n")
+  cat("Any excl hits:     ", sum(nis_excl, na.rm=TRUE),         "\n")
+  cat("nis_crit_a sum:    ", sum(nis_crit_a, na.rm=TRUE),       "\n")
+  cat("nis_crit_b sum:    ", sum(nis_crit_b, na.rm=TRUE),       "\n")
+  cat("nis_g1 sum:        ", sum(nis_g1, na.rm=TRUE),           "\n")
+  cat("Sample I10_DX1:    ",
+      paste(head(trimws(nis$I10_DX1), 3), collapse=", "),       "\n")
+  cat("Sample I10_PR1:    ",
+      paste(head(trimws(nis$I10_PR1), 3), collapse=", "),       "\n")
+  cat("nis_total_unw:     ", nis_total_unw,                     "\n")
+  cat("nis_total_w:       ", nis_total_w,                       "\n")
   cat("==========================================\n\n")
 
   nis_parallel_results <- tibble(
