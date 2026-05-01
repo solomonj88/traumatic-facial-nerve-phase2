@@ -22,7 +22,7 @@ execute:
 <!--
 ============================================================
 CHANGELOG
-v2.1 — 2026-05-01 — Code-quality fixes plus polytrauma/co-procedure analyses:
+v2.1 — 2026-05-01 — Code-quality fixes plus NIS clinical analyses:
        (1) Removed the v2.0 NIS-chunk diagnostic block (production cleanup).
        (2) Updated stale "v1.7 logic" comments in the NIS chunk to reflect
            v2.0/v2.1 logic.
@@ -39,12 +39,21 @@ v2.1 — 2026-05-01 — Code-quality fixes plus polytrauma/co-procedure analyses
        (6) NEW chunk: nis-polytrauma — flags Group 1 encounters with
            trauma codes outside the head/neck region (S20-S99 or T07/T08)
            and reports repair rate stratified by polytrauma status.
-       (7) NEW chunk: nis-cooccur-procedures — top PCS codes co-occurring
-           in Group 2 (repaired) vs Group 3 (not repaired). Identifies
-           procedures suggesting polytrauma prioritization in non-repair.
-       (8) Both new analyses are framed as exploratory single-year analyses;
-           HCUP DUA cell suppression (N<11) applied throughout. Multi-year
-           NIS extension (2019-2022) would unlock real inferential power.
+       (7) NEW analysis: nis-cooccur-procedures redesigned with TWO tables:
+           (a) clinical-category groupings (~12 categories) so most cells
+           survive the HCUP N<11 suppression rule and yield interpretable
+           output; (b) raw PCS codes retained for transparency.
+       (8) NEW chunk: nis-disposition — analyzes DISPUNIFORM with
+           collapsed categories (Home/routine, Transfer, AMA, Died, Other)
+           and reports repair rate within each disposition stratum.
+       (9) NEW chunk: nis-los — length of stay distribution stratified by
+           repair status, with median, IQR, mean, and percentage in
+           short/medium/long bands.
+       (10) Auto-discovery of disposition/LOS column positions: parses
+           the StataLoad_NIS_2023_Core.Do file to extract exact byte
+           positions of AGE/DIED/DISPUNIFORM/LOS/TOTCHG. Disposition and
+           LOS chunks gracefully display "pending" if the StataLoad file
+           is not found, with instructions for enabling.
 v2.0 — 2026-04-30 — NIS chunk redesigned to align with the research
        question (acute traumatic facial nerve laceration and repair):
        (1) NIS Group 1 now defined as (A OR B):
@@ -2792,14 +2801,79 @@ if (!nis_available) {
   #   HOSP_NIS    1-5, NIS_STRATUM 16-19, DISCWT 31-41
   #   I10_DX1-40  starting at col 67, 7 chars each
   #   I10_PR1-25  starting at col 355, 7 chars each
+
+  # ── Auto-discover positions for disposition/LOS analysis ─────────────────
+  # Attempts to find and parse the StataLoad .Do file, which specifies the
+  # exact byte positions of every variable in the ASC file. If found,
+  # AGE / DIED / DISPUNIFORM / LOS / TOTCHG positions are added to col_spec
+  # and the disposition/LOS chunks downstream can run. If not found, those
+  # chunks display a "pending" message with instructions.
+  parse_stataload_positions <- function(do_file) {
+    lines <- readLines(do_file, warn=FALSE)
+    positions <- list()
+    for (l in lines) {
+      # HCUP StataLoad format: _column(START) TYPE NAME %WIDTHf
+      # Example:  _column(20)   byte    AGE     %2f
+      m <- regmatches(l, regexec(
+        "_column\\((\\d+)\\)\\s+\\S+\\s+([A-Z][A-Z0-9_]*)\\s+%(\\d+)",
+        l))[[1]]
+      if (length(m) == 4) {
+        start <- as.integer(m[2])
+        width <- as.integer(m[4])
+        positions[[m[3]]] <- c(start = start, end = start + width - 1L)
+      }
+    }
+    positions
+  }
+
+  stataload_candidates <- c(
+    file.path(local_hcup, "HCUP NIS", "StataLoad_NIS_2023_Core.Do"),
+    file.path(local_hcup, "HCUP NIS", "NIS_2023", "StataLoad_NIS_2023_Core.Do"),
+    file.path(local_hcup, "HCUP NIS", "STATA Load Programs",
+              "StataLoad_NIS_2023_Core.Do"),
+    file.path(local_hcup, "HCUP NIS", "Stata Load Programs",
+              "StataLoad_NIS_2023_Core.Do"),
+    file.path(local_hcup, "STATA Load Programs for all years",
+              "StataLoad_NIS_2023_Core.Do")
+  )
+  sl_file <- stataload_candidates[file.exists(stataload_candidates)]
+  sl_file <- if (length(sl_file) > 0) sl_file[1] else NA_character_
+
+  nis_extra_cols <- list()
+  if (!is.na(sl_file)) {
+    parsed <- parse_stataload_positions(sl_file)
+    target_vars <- c("AGE", "DIED", "DISPUNIFORM", "LOS", "TOTCHG")
+    for (v in target_vars) {
+      if (v %in% names(parsed)) nis_extra_cols[[v]] <- parsed[[v]]
+    }
+    message("Parsed ", length(nis_extra_cols),
+            " extra column positions from: ", sl_file)
+    for (v in names(nis_extra_cols)) {
+      message("  ", v, ": cols ", nis_extra_cols[[v]]["start"],
+              "-", nis_extra_cols[[v]]["end"])
+    }
+  } else {
+    message("StataLoad .Do file not found in standard locations.")
+    message("Disposition / LOS analyses will display 'pending' message.")
+    message("To enable: place StataLoad_NIS_2023_Core.Do in HCUP NIS/ folder")
+    message("or in HCUP NIS/STATA Load Programs/ subfolder.")
+  }
+
   dx_starts <- seq(67,  by=7, length.out=40)
   pr_starts <- seq(355, by=7, length.out=25)
 
-  col_starts <- c(1,  16,  31,  dx_starts, pr_starts)
-  col_ends   <- c(5,  19,  41,  dx_starts+6, pr_starts+6)
+  extra_starts <- if (length(nis_extra_cols) > 0)
+    vapply(nis_extra_cols, function(x) x[["start"]], integer(1)) else integer(0)
+  extra_ends   <- if (length(nis_extra_cols) > 0)
+    vapply(nis_extra_cols, function(x) x[["end"]],   integer(1)) else integer(0)
+  extra_names  <- names(nis_extra_cols)
+
+  col_starts <- c(1,  16,  31,  dx_starts,    pr_starts,    extra_starts)
+  col_ends   <- c(5,  19,  41,  dx_starts+6,  pr_starts+6,  extra_ends)
   col_names  <- c("HOSP_NIS","NIS_STRATUM","DISCWT",
                   paste0("I10_DX", 1:40),
-                  paste0("I10_PR", 1:25))
+                  paste0("I10_PR", 1:25),
+                  extra_names)
 
   col_spec <- fwf_positions(start = col_starts,
                              end   = col_ends,
@@ -2910,10 +2984,11 @@ if (!nis_available) {
   nis_both   <- sum( nis_crit_a &  nis_crit_b & !nis_excl)
   nis_dropped_excl <- sum((nis_crit_a | nis_crit_b) & nis_excl)
 
-  # ── Build nis_g1_data with dx_raw and pr_raw for downstream chunks ──────
+  # ── Build nis_g1_data with dx_raw, pr_raw, and (if available) extras ────
   # Only Group 1 encounters; carries all 40 dx columns and 25 pr columns
-  # concatenated as pipe-separated strings. Used by mechanism, polytrauma,
-  # and co-occurring-procedure chunks.
+  # concatenated as pipe-separated strings. If StataLoad parser found
+  # AGE/DIED/DISPUNIFORM/LOS/TOTCHG positions, those columns are also
+  # included for use by disposition and LOS chunks.
   if (nis_total_unw > 0) {
     clean_codes <- function(mat) {
       apply(mat, 1, function(row) {
@@ -2928,6 +3003,13 @@ if (!nis_available) {
       dx_raw     = clean_codes(nis[nis_g1, nis_dx_cols, drop=FALSE]),
       pr_raw     = clean_codes(nis[nis_g1, nis_pr_cols, drop=FALSE])
     )
+    # Append extra columns (AGE / DIED / DISPUNIFORM / LOS / TOTCHG) if read
+    if (length(nis_extra_cols) > 0) {
+      for (v in names(nis_extra_cols)) {
+        raw_vals <- trimws(as.character(nis[[v]][nis_g1]))
+        nis_g1_data[[v]] <- raw_vals
+      }
+    }
   } else {
     nis_g1_data <- tibble(
       had_repair = integer(0),
@@ -3247,15 +3329,23 @@ nis_polytrauma_display %>%
 #| cache: false
 # EXPLORATORY single-year analysis (n=60 unweighted Group 1).
 #
-# Tabulates the most common ICD-10-PCS procedures co-occurring with
-# Group 1 encounters, separated by Group 2 (repaired) vs Group 3 (not
-# repaired). Procedures more common in Group 3 may suggest competing
-# operative priorities (orthopedic, neurosurgical, vascular) or
-# critical-care procedures (mechanical ventilation, intubation) that
-# could explain deferred facial nerve repair.
+# Two-table presentation of co-occurring procedures, designed to maximize
+# information return given the HCUP DUA N<11 cell-suppression rule:
 #
-# The defining facial nerve repair PCS codes are excluded so the table
-# shows only "other" procedures co-occurring on the encounter.
+#   Table A: clinical-category groupings — collapses the granular ICD-10-PCS
+#            code-space into ~12 clinically meaningful categories (skin/soft
+#            tissue, skeletal/fracture fixation, vascular, nervous system,
+#            mechanical ventilation, etc.). This produces larger bin counts
+#            so most categories survive the N<11 suppression threshold.
+#
+#   Table B: raw ICD-10-PCS codes — kept for transparency / reproducibility,
+#            but expected to be heavily suppressed at single-year scale.
+#
+# Defining facial nerve repair codes (01QM, 00QM, 01UM series) are excluded
+# from both tables so they show only OTHER procedures co-occurring on the
+# encounter. Procedures more frequent in Group 3 (no repair) than Group 2
+# (repaired) may indicate polytrauma operative prioritization or critical-
+# care interventions that displaced facial nerve repair.
 
 facial_nerve_repair_pcs <- c(
   "01QM0ZZ","01QM3ZZ","01QM4ZZ",
@@ -3263,13 +3353,52 @@ facial_nerve_repair_pcs <- c(
   "01UM07Z","01UM0KZ","01UM0JZ"
 )
 
+# ── Clinical category classifier for ICD-10-PCS codes ────────────────────
+# First two characters of an ICD-10-PCS code identify section + body system,
+# which maps cleanly onto clinical purpose for the trauma context.
+classify_pcs <- function(code) {
+  if (is.na(code) || nchar(code) < 2) return("Unknown")
+  prefix <- substr(code, 1, 2)
+  ch1    <- substr(code, 1, 1)
+
+  # Med/surg by body system (first character "0")
+  if (prefix %in% c("0H", "0J"))                  return("Skin / soft tissue")
+  if (prefix %in% c("0N","0P","0Q","0R","0S"))    return("Skeletal / fracture fixation")
+  if (prefix %in% c("03", "04", "05", "06"))      return("Vascular")
+  if (prefix %in% c("02", "0B"))                  return("Cardiac / thoracic")
+  if (prefix %in% c("00", "01"))                  return("Other nervous system")
+  if (prefix %in% c("08", "09", "0C"))            return("Eye / ear / mouth / throat")
+  if (prefix %in% c("0D", "0F"))                  return("GI / hepatobiliary")
+  if (prefix %in% c("0K","0L","0M"))              return("Muscle / tendon / bursae")
+  if (prefix %in% c("0T", "0U", "0V","0W"))       return("Urinary / reproductive / anatomic regions")
+
+  # Other sections by first character
+  if (ch1 == "5") return("Mechanical / extracorporeal support")
+  if (ch1 == "3") return("Transfusion / drug administration")
+  if (ch1 == "B") return("Imaging")
+  if (ch1 == "4") return("Measurement / monitoring")
+  if (ch1 == "C") return("Nuclear medicine")
+  if (ch1 == "F") return("PT / OT / speech / audiology")
+  if (ch1 == "X") return("New technology")
+
+  if (ch1 == "0") return("Other med/surg")
+  return("Other")
+}
+
 if (!exists("nis_g1_data") || nrow(nis_g1_data) == 0) {
   message("NIS Group 1 cohort empty; skipping co-procedure analysis.")
-  nis_proc_display <- tibble(
-    `PCS code`         = "Status",
-    `Group 2 N (rep.)` = NA_integer_,
+  nis_proc_cat_display <- tibble(
+    `Clinical category` = "Status",
+    `Group 2 N (rep.)`  = NA_integer_,
     `Group 3 N (no rep.)` = NA_integer_,
-    `Total N`          = NA_integer_
+    `Total N`           = NA_integer_
+  )
+  nis_proc_raw_display <- tibble(
+    `PCS code`            = "Status",
+    `Clinical category`   = NA_character_,
+    `Group 2 N (rep.)`    = NA_integer_,
+    `Group 3 N (no rep.)` = NA_integer_,
+    `Total N`             = NA_integer_
   )
 } else {
   # Explode pr_raw into long format (one row per encounter-procedure pair)
@@ -3278,20 +3407,42 @@ if (!exists("nis_g1_data") || nrow(nis_g1_data) == 0) {
     tidyr::separate_rows(pr_raw, sep="\\|") %>%
     filter(nzchar(pr_raw),
            !pr_raw %in% facial_nerve_repair_pcs) %>%
-    rename(pcs = pr_raw)
+    rename(pcs = pr_raw) %>%
+    mutate(category = vapply(pcs, classify_pcs, character(1)))
 
   if (nrow(nis_proc_long) == 0) {
-    message("No co-occurring procedures found in NIS Group 1.")
-    nis_proc_display <- tibble(
-      `PCS code` = "(none)",
-      `Group 2 N (rep.)` = 0L,
+    nis_proc_cat_display <- tibble(
+      `Clinical category` = "(no co-occurring procedures)",
+      `Group 2 N (rep.)`  = 0L,
       `Group 3 N (no rep.)` = 0L,
-      `Total N` = 0L
+      `Total N`           = 0L
     )
+    nis_proc_raw_display <- nis_proc_cat_display %>%
+      rename(`PCS code` = `Clinical category`) %>%
+      mutate(`Clinical category` = NA_character_, .after = `PCS code`)
   } else {
-    # Top 20 most-common co-occurring PCS codes overall, broken out by group
-    nis_proc_summary <- nis_proc_long %>%
-      group_by(pcs) %>%
+    # ── Table A: clinical categories ─────────────────────────────────────
+    nis_proc_cat_summary <- nis_proc_long %>%
+      group_by(category) %>%
+      summarise(
+        `Group 2 N (rep.)`    = sum(had_repair == 1),
+        `Group 3 N (no rep.)` = sum(had_repair == 0),
+        `Total N`             = n(),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(`Total N`))
+
+    # HCUP DUA suppression applies per cell, but on a CATEGORY-level table
+    # the totals are large enough that most categories will be reportable.
+    # Suppress only individual cells where the value is < 11.
+    nis_proc_cat_display <- nis_proc_cat_summary %>%
+      mutate(across(c(`Group 2 N (rep.)`, `Group 3 N (no rep.)`, `Total N`),
+                    ~ ifelse(. < 11 & . > 0, NA, .))) %>%
+      rename(`Clinical category` = category)
+
+    # ── Table B: raw PCS codes (kept for transparency) ───────────────────
+    nis_proc_raw_summary <- nis_proc_long %>%
+      group_by(pcs, category) %>%
       summarise(
         `Group 2 N (rep.)`    = sum(had_repair == 1),
         `Group 3 N (no rep.)` = sum(had_repair == 0),
@@ -3301,26 +3452,208 @@ if (!exists("nis_g1_data") || nrow(nis_g1_data) == 0) {
       arrange(desc(`Total N`)) %>%
       slice_head(n = 20)
 
-    # HCUP DUA cell suppression for unweighted N < 11
-    nis_proc_display <- nis_proc_summary %>%
+    nis_proc_raw_display <- nis_proc_raw_summary %>%
       mutate(across(c(`Group 2 N (rep.)`, `Group 3 N (no rep.)`, `Total N`),
-                    ~ ifelse(. < 11, NA, .))) %>%
-      rename(`PCS code` = pcs)
+                    ~ ifelse(. < 11 & . > 0, NA, .))) %>%
+      rename(`PCS code` = pcs, `Clinical category` = category)
   }
 }
 
-nis_proc_display %>%
+nis_proc_cat_display %>%
   kable(caption = paste0(
-    "NIS 2023 most common co-occurring ICD-10-PCS procedures in Group 1 ",
-    "encounters, stratified by repair status. Defining facial nerve repair ",
-    "codes (01QM, 00QM, 01UM series) are excluded so the table shows only ",
-    "other operations performed during the same admission. Procedures ",
-    "appearing more frequently in Group 3 (no repair) than Group 2 ",
-    "(repaired) may indicate polytrauma operative prioritization or ",
+    "NIS 2023 co-occurring procedures grouped by clinical category. ",
+    "ICD-10-PCS codes are mapped to broader clinical purposes (skin/soft ",
+    "tissue, skeletal/fracture fixation, vascular, mechanical ventilation, ",
+    "etc.) to overcome HCUP DUA cell suppression at the granular code ",
+    "level. Categories with higher counts in Group 3 (no repair) than ",
+    "Group 2 (repaired) suggest polytrauma operative prioritization or ",
     "critical-care interventions that contributed to facial nerve repair ",
-    "deferral. Per HCUP DUA, cells with N < 11 are suppressed (NA). HCUP ",
-    "NIS 2023. EXPLORATORY: small single-year sample limits interpretation; ",
+    "deferral. Per HCUP DUA, cells with 1 \u2264 N < 11 are suppressed (NA); ",
+    "cells with exactly 0 are reported as 0. HCUP NIS 2023. ",
+    "EXPLORATORY: small single-year sample limits interpretation; ",
     "multi-year extension recommended."),
+    format.args = list(big.mark=",")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE)
+
+nis_proc_raw_display %>%
+  kable(caption = paste0(
+    "NIS 2023 most common raw ICD-10-PCS codes co-occurring in Group 1, ",
+    "stratified by repair status. This table is included for transparency ",
+    "and reproducibility but is expected to be heavily suppressed by the ",
+    "HCUP DUA N<11 rule at single-year scale; the clinical-category table ",
+    "above is the primary interpretive view. HCUP NIS 2023."),
+    format.args = list(big.mark=",")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE)
+```
+
+# NIS Disposition (2023)
+
+```{r nis-disposition}
+#| cache: false
+# Disposition analysis using DISPUNIFORM. Standard HCUP DISPUNIFORM codes:
+#   1   Routine (home)
+#   2   Short-term hospital
+#   5   Other facility (rehab, SNF, etc.)
+#   6   Home health care
+#   7   Against medical advice (AMA)
+#   20  Died in hospital
+#   21  Discharge / transfer to court / law enforcement
+#   99  Discharged alive, destination unknown
+# We collapse to a smaller set of clinically meaningful categories.
+#
+# This chunk requires the DISPUNIFORM column to have been read in the
+# parallel-cohort chunk (auto-parsed from the StataLoad .Do file). If
+# the StataLoad file was not found, this chunk displays a "pending"
+# message instead of analysis.
+
+classify_disposition <- function(code) {
+  if (is.na(code) || !nzchar(code)) return("Unknown / missing")
+  n <- suppressWarnings(as.integer(code))
+  if (is.na(n))                  return("Unknown / missing")
+  if (n %in% c(1L, 6L))          return("Home / routine")
+  if (n %in% c(2L, 5L, 21L))     return("Transfer / discharge to facility")
+  if (n == 7L)                   return("AMA")
+  if (n == 20L)                  return("Died in hospital")
+  return("Other / unknown")
+}
+
+has_dispuniform <- exists("nis_g1_data") &&
+                   nrow(nis_g1_data) > 0 &&
+                   "DISPUNIFORM" %in% names(nis_g1_data)
+
+if (!has_dispuniform) {
+  nis_disposition_display <- tibble(
+    Disposition = "Pending: column positions not parsed",
+    `Unweighted N` = NA_integer_,
+    `Weighted N`   = NA_integer_,
+    `% of Group 1` = NA_real_
+  )
+  message("NIS disposition analysis pending: DISPUNIFORM column not in nis_g1_data.")
+  message("Place StataLoad_NIS_2023_Core.Do in HCUP NIS/ folder to enable.")
+} else {
+  nis_disp_assignments <- nis_g1_data %>%
+    mutate(disposition = vapply(DISPUNIFORM, classify_disposition, character(1)))
+
+  total_w <- sum(nis_disp_assignments$discwt, na.rm=TRUE)
+
+  nis_disposition_summary <- nis_disp_assignments %>%
+    group_by(disposition) %>%
+    summarise(
+      `Unweighted N`            = n(),
+      `Weighted N`              = round(sum(discwt, na.rm=TRUE)),
+      `Repair (unweighted N)`   = sum(had_repair == 1),
+      `Repair (weighted N)`     = round(sum(discwt[had_repair == 1], na.rm=TRUE)),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      `% of Group 1 (weighted)` = round(100 * `Weighted N` / max(total_w, 1), 1),
+      `Repair rate (%)`         = ifelse(`Weighted N` > 0,
+                                          round(100 * `Repair (weighted N)` /
+                                                `Weighted N`, 1), NA_real_)
+    ) %>%
+    arrange(desc(`Unweighted N`))
+
+  nis_disposition_display <- nis_disposition_summary %>%
+    mutate(across(c(`Unweighted N`, `Weighted N`,
+                     `Repair (unweighted N)`, `Repair (weighted N)`,
+                     `Repair rate (%)`),
+                  ~ ifelse(`Unweighted N` < 11, NA, .))) %>%
+    rename(Disposition = disposition)
+}
+
+nis_disposition_display %>%
+  kable(caption = paste0(
+    "NIS 2023 discharge disposition for Group 1 encounters, classified ",
+    "from DISPUNIFORM. Categories collapsed for reportability: 'Home/routine' ",
+    "(codes 1, 6); 'Transfer/discharge to facility' (codes 2, 5, 21); ",
+    "'AMA' (code 7); 'Died in hospital' (code 20). Repair rate within each ",
+    "stratum reveals whether non-repair (Group 3) was associated with ",
+    "transfer for definitive management at a higher level of care. Per ",
+    "HCUP DUA, cells with unweighted N < 11 are suppressed (NA). HCUP ",
+    "NIS 2023. EXPLORATORY: small sample; multi-year extension recommended."),
+    format.args = list(big.mark=",")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE)
+```
+
+# NIS Length of Stay (2023)
+
+```{r nis-los}
+#| cache: false
+# Length of stay analysis. Hypothesis: short LOS in Group 3 (no repair)
+# may indicate transfers out before repair, while long LOS may indicate
+# polytrauma admissions where facial nerve repair was deprioritized.
+#
+# Requires LOS column in nis_g1_data (auto-parsed from StataLoad file).
+
+has_los <- exists("nis_g1_data") &&
+           nrow(nis_g1_data) > 0 &&
+           "LOS" %in% names(nis_g1_data)
+
+if (!has_los) {
+  nis_los_display <- tibble(
+    Group = "Pending: column positions not parsed",
+    `N`   = NA_integer_,
+    `Median LOS (days)` = NA_real_,
+    `IQR` = NA_character_,
+    `Mean LOS (days)`   = NA_real_,
+    `LOS \u22641 day (%)`  = NA_real_,
+    `LOS 2-7 days (%)`  = NA_real_,
+    `LOS \u22658 days (%)`  = NA_real_
+  )
+  message("NIS LOS analysis pending: LOS column not in nis_g1_data.")
+  message("Place StataLoad_NIS_2023_Core.Do in HCUP NIS/ folder to enable.")
+} else {
+  los_summary <- nis_g1_data %>%
+    mutate(los_n = suppressWarnings(as.numeric(LOS))) %>%
+    filter(!is.na(los_n) & los_n >= 0) %>%
+    mutate(
+      group = factor(ifelse(had_repair == 1, "Group 2 (repaired)",
+                                              "Group 3 (not repaired)"),
+                      levels = c("Group 2 (repaired)", "Group 3 (not repaired)"))
+    )
+
+  nis_los_summary <- los_summary %>%
+    group_by(group) %>%
+    summarise(
+      N            = n(),
+      `Median LOS (days)` = median(los_n, na.rm=TRUE),
+      Q1           = quantile(los_n, 0.25, na.rm=TRUE),
+      Q3           = quantile(los_n, 0.75, na.rm=TRUE),
+      `Mean LOS (days)`   = round(mean(los_n, na.rm=TRUE), 1),
+      `LOS \u22641 day (N)`  = sum(los_n <= 1, na.rm=TRUE),
+      `LOS 2-7 days (N)`  = sum(los_n >= 2 & los_n <= 7, na.rm=TRUE),
+      `LOS \u22658 days (N)`  = sum(los_n >= 8, na.rm=TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      `IQR` = paste0(Q1, "-", Q3),
+      `LOS \u22641 day (%)`  = ifelse(N > 0, round(100 * `LOS \u22641 day (N)`  / N, 1), NA_real_),
+      `LOS 2-7 days (%)`     = ifelse(N > 0, round(100 * `LOS 2-7 days (N)`     / N, 1), NA_real_),
+      `LOS \u22658 days (%)`  = ifelse(N > 0, round(100 * `LOS \u22658 days (N)`  / N, 1), NA_real_)
+    ) %>%
+    select(-Q1, -Q3,
+           -`LOS \u22641 day (N)`, -`LOS 2-7 days (N)`, -`LOS \u22658 days (N)`)
+
+  nis_los_display <- nis_los_summary %>%
+    mutate(across(c(`Median LOS (days)`, `Mean LOS (days)`,
+                     `LOS \u22641 day (%)`, `LOS 2-7 days (%)`,
+                     `LOS \u22658 days (%)`),
+                  ~ ifelse(N < 11, NA, .))) %>%
+    rename(Group = group)
+}
+
+nis_los_display %>%
+  kable(caption = paste0(
+    "NIS 2023 length of stay (LOS) distribution for Group 1 encounters, ",
+    "stratified by repair status. Short LOS (\u22641 day) in Group 3 may ",
+    "indicate transfer to a higher-level facility before repair was ",
+    "performed; long LOS (\u22658 days) suggests polytrauma admission with ",
+    "competing operative priorities. Per HCUP DUA, statistics for groups ",
+    "with N < 11 are suppressed (NA). HCUP NIS 2023. EXPLORATORY: small ",
+    "sample; multi-year extension recommended."),
     format.args = list(big.mark=",")) %>%
   kable_styling(bootstrap_options = c("striped","hover","condensed"),
                 full_width = TRUE)
