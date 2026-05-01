@@ -181,56 +181,54 @@ message("Phase 2 output_dir confirmed: ", output_dir)
 # Configuration
 
 ```{r config}
-# ── Data location ────────────────────────────────────────────────────────────
-# v1.9: data files migrated to local Desktop alias for faster reads.
-# OneDrive paths retained as fallback in case local files are unavailable.
-local_data_root <- path.expand(
-  "~/Desktop/Otolaryngology - Head and Neck Surgery alias/HCUP Data"
-)
-onedrive_data_root <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data"
+# ── Data paths ───────────────────────────────────────────────────────────────
+# All data files are stored locally in the Desktop alias for fast reads.
+# Output paths remain on OneDrive for backup and version control.
 
-if (dir.exists(local_data_root)) {
-  data_root <- local_data_root
-  message("Using LOCAL data root: ", data_root)
-} else {
-  data_root <- onedrive_data_root
-  message("Local data root not found; falling back to OneDrive: ", data_root)
+local_hcup <- "/Users/solomon/Desktop/Otolaryngology - Head and Neck Surgery alias/HCUP Data"
+
+# NASS 2016-2020: nested under Data Files NASS 2016-2020/Raw Data Files NASS 2016-2020
+d16_20 <- file.path(local_hcup,
+  "HCUP NASS/Data Files NASS 2016-2020/Raw Data Files NASS 2016-2020")
+
+# NASS 2021-2023: nested under Raw Data Files NASS 2021-2023/NASS_YYYY
+d21 <- file.path(local_hcup, "HCUP NASS/Raw Data Files NASS 2021-2023/NASS_2021")
+d22 <- file.path(local_hcup, "HCUP NASS/Raw Data Files NASS 2021-2023/NASS_2022")
+d23 <- file.path(local_hcup, "HCUP NASS/Raw Data Files NASS 2021-2023/NASS_2023")
+
+# NIS 2023: local Desktop alias
+nis_core_asc_path <- file.path(local_hcup,
+  "HCUP NIS/NIS_2023/NIS_2023_Core.ASC")
+
+# Output paths: OneDrive
+onedrive_base <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Analysis/Phase 2"
+xlsx_dir  <- file.path(onedrive_base, "Excel")
+word_dir  <- file.path(onedrive_base, "Word Tables")
+fig_dir   <- file.path(onedrive_base, "Figures")
+
+# Sanity check — warn early if any directory is missing
+for (d in c(d16_20, d21, d22, d23)) {
+  if (!dir.exists(d)) warning("Directory not found: ", d)
 }
-
-# Subdirectories (match the existing OneDrive structure)
-d16_23 <- file.path(data_root, "NASS_HCUP Database", "RAW Data Files HNASS")
-d21    <- file.path(data_root,
-            "HCUP Original Data Files 21 through 23",
-            "HCUP NASS 21 through 23", "NASS_2021")
-d22    <- file.path(data_root,
-            "HCUP Original Data Files 21 through 23",
-            "HCUP NASS 21 through 23", "NASS_2022")
-d23    <- file.path(data_root,
-            "HCUP Original Data Files 21 through 23",
-            "HCUP NASS 21 through 23", "NASS_2023")
-
-# Sanity-check: warn early if any subdirectory is missing
-for (d in c(d16_23, d21, d22, d23)) {
-  if (!dir.exists(d)) warning("NASS data subdirectory not found: ", d)
-}
+if (!file.exists(nis_core_asc_path)) warning("NIS ASC not found: ", nis_core_asc_path)
 
 enc_files <- list(
-  "2016" = file.path(d16_23, "NASS_2016_Encounter-002.dta"),
-  "2017" = file.path(d16_23, "NASS_2017_Encounter-003.dta"),
-  "2018" = file.path(d16_23, "NASS_2018_Encounter-001.dta"),
-  "2019" = file.path(d16_23, "NASS_2019_Encounter-005.dta"),
-  "2020" = file.path(d16_23, "NASS_2020_Encounter.dta"),
+  "2016" = file.path(d16_20, "NASS_2016_Encounter-002.dta"),
+  "2017" = file.path(d16_20, "NASS_2017_Encounter-003.dta"),
+  "2018" = file.path(d16_20, "NASS_2018_Encounter-001.dta"),
+  "2019" = file.path(d16_20, "NASS_2019_Encounter-005.dta"),
+  "2020" = file.path(d16_20, "NASS_2020_Encounter.dta"),
   "2021" = file.path(d21,    "NASS_2021_Encounter.dta"),
   "2022" = file.path(d22,    "NASS_2022_Encounter.dta"),
   "2023" = file.path(d23,    "NASS_2023_Encounter.dta")
 )
 
 hosp_files <- list(
-  "2016" = file.path(d16_23, "NASS_2016_Hospital.dta"),
-  "2017" = file.path(d16_23, "NASS_2017_Hospital.dta"),
-  "2018" = file.path(d16_23, "NASS_2018_Hospital.dta"),
-  "2019" = file.path(d16_23, "NASS_2019_Hospital.dta"),
-  "2020" = file.path(d16_23, "NASS_2020_Hospital.dta"),
+  "2016" = file.path(d16_20, "NASS_2016_Hospital.dta"),
+  "2017" = file.path(d16_20, "NASS_2017_Hospital.dta"),
+  "2018" = file.path(d16_20, "NASS_2018_Hospital.dta"),
+  "2019" = file.path(d16_20, "NASS_2019_Hospital.dta"),
+  "2020" = file.path(d16_20, "NASS_2020_Hospital.dta"),
   "2021" = file.path(d21,    "NASS_2021_Hospital.dta"),
   "2022" = file.path(d22,    "NASS_2022_Hospital.dta"),
   "2023" = file.path(d23,    "NASS_2023_Hospital.dta")
@@ -2742,25 +2740,17 @@ message("\nAll Word tables saved to: ", word_dir)
 
 library(readr)
 
-# v1.9: prefer local Desktop alias; fall back to OneDrive if not present
-nis_subpath <- file.path("HCUP NIS", "NIS_2023", "NIS_2023_Core.ASC")
-nis_local    <- file.path(local_data_root,    nis_subpath)
-nis_onedrive <- file.path(onedrive_data_root, nis_subpath)
-
-nis_core_asc <- if (file.exists(nis_local)) {
-  message("NIS 2023 ASC located locally: ", nis_local)
-  nis_local
-} else if (file.exists(nis_onedrive)) {
-  message("NIS 2023 ASC located in OneDrive (fallback): ", nis_onedrive)
-  nis_onedrive
+# NIS path from config — local Desktop alias
+nis_core_asc   <- nis_core_asc_path
+nis_available  <- file.exists(nis_core_asc)
+if (nis_available) {
+  message("NIS 2023 ASC found: ", nis_core_asc)
 } else {
-  ""
+  message("NIS 2023 ASC NOT found at: ", nis_core_asc)
 }
 
-nis_available <- nzchar(nis_core_asc) && file.exists(nis_core_asc)
 if (!nis_available) {
-  message("NIS 2023 ASC file not found at either location.")
-  message("Skipping NIS parallel cohort analysis. Update paths if needed.")
+  message("Skipping NIS parallel cohort analysis.")
   nis_parallel_results <- tibble(
     Metric = c("Status"),
     Value  = c("NIS 2023 file unavailable \u2014 chunk skipped")
