@@ -2,7 +2,7 @@
 title: "Traumatic Facial Nerve Laceration: HCUP NASS 2016–2023 (Phase 2)"
 author: "Solomon Johnson"
 date: "`r Sys.Date()`"
-output-file: "nass_phase2_analysis_1_8.html"
+output-file: "nass_phase2_analysis_1_9.html"
 format:
   html:
     toc: true
@@ -22,6 +22,20 @@ execute:
 <!--
 ============================================================
 CHANGELOG
+v1.9 — 2026-04-30 — Three changes:
+       (1) Fixed NIS parallel cohort error — flags were referenced
+           outside the survey design data; now added as integer
+           columns to nis before svydesign so svytotal can resolve
+           them. Wrapped svytotal calls with as.numeric() to coerce
+           the named coefficient vector to scalar.
+       (2) Data paths migrated from OneDrive to local Desktop alias
+           (~/Desktop/Otolaryngology - Head and Neck Surgery alias/
+           HCUP Data/). Substantially faster reads vs OneDrive
+           CloudStorage. Output paths remain on OneDrive.
+       (3) Explicit multicore optimization: set options(mc.cores)
+           and use future plan(multisession) with
+           parallel::detectCores() throughout. Cache MUST be
+           cleared before re-rendering due to path changes.
 v1.8 — 2026-04-30 — Three additions:
        (1) Mechanism-of-injury descriptive analysis using V/W/X/Y
            external cause codes within Group 1. New chunk
@@ -119,6 +133,14 @@ library(knitr);     library(kableExtra);library(maps);     library(mapproj)
 library(DiagrammeR);library(DiagrammeRsvg);library(rsvg)
 library(gt);
 
+# ── Multicore / parallelization configuration ──────────────────────────────
+# Use all available cores minus 1 by default. parallel::detectCores() returns
+# the total number of logical CPUs; we leave one for the OS and other tasks.
+n_cores <- max(1L, parallel::detectCores() - 1L)
+options(mc.cores = n_cores)
+message("Multicore configured: ", n_cores, " of ",
+        parallel::detectCores(), " cores will be used")
+
 # Phase 2 output directory — OneDrive only, no Desktop output
 output_dir <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Analysis/Phase 2"
 
@@ -143,10 +165,38 @@ message("Phase 2 output_dir confirmed: ", output_dir)
 # Configuration
 
 ```{r config}
-d16_23 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/NASS_HCUP Database/RAW Data Files HNASS"
-d21 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2021"
-d22 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2022"
-d23 <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data/HCUP Original Data Files 21 through 23/HCUP NASS 21 through 23/NASS_2023"
+# ── Data location ────────────────────────────────────────────────────────────
+# v1.9: data files migrated to local Desktop alias for faster reads.
+# OneDrive paths retained as fallback in case local files are unavailable.
+local_data_root <- path.expand(
+  "~/Desktop/Otolaryngology - Head and Neck Surgery alias/HCUP Data"
+)
+onedrive_data_root <- "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/NASS traumatic facial nerve repair project/Data"
+
+if (dir.exists(local_data_root)) {
+  data_root <- local_data_root
+  message("Using LOCAL data root: ", data_root)
+} else {
+  data_root <- onedrive_data_root
+  message("Local data root not found; falling back to OneDrive: ", data_root)
+}
+
+# Subdirectories (match the existing OneDrive structure)
+d16_23 <- file.path(data_root, "NASS_HCUP Database", "RAW Data Files HNASS")
+d21    <- file.path(data_root,
+            "HCUP Original Data Files 21 through 23",
+            "HCUP NASS 21 through 23", "NASS_2021")
+d22    <- file.path(data_root,
+            "HCUP Original Data Files 21 through 23",
+            "HCUP NASS 21 through 23", "NASS_2022")
+d23    <- file.path(data_root,
+            "HCUP Original Data Files 21 through 23",
+            "HCUP NASS 21 through 23", "NASS_2023")
+
+# Sanity-check: warn early if any subdirectory is missing
+for (d in c(d16_23, d21, d22, d23)) {
+  if (!dir.exists(d)) warning("NASS data subdirectory not found: ", d)
+}
 
 enc_files <- list(
   "2016" = file.path(d16_23, "NASS_2016_Encounter-002.dta"),
@@ -408,7 +458,9 @@ extract_year <- function(year, enc_fp, hosp_fp) {
 ```{r run-extraction}
 #| cache: true
 message("Starting parallel extraction 2016-2023 (Phase 2 criteria)...")
-plan(multisession, workers = max(1, availableCores()-1))
+message("Workers: ", n_cores, " (parallel::detectCores() = ",
+        parallel::detectCores(), ")")
+plan(multisession, workers = n_cores)
 enc_all <- bind_rows(Filter(Negate(is.null),
   future_map2(names(enc_files), enc_files,
     ~ extract_year(.x, .y, hosp_files[[.x]]),
@@ -2381,7 +2433,7 @@ addStyle(wb, "Mechanism of Injury", note_s, rows=fn_m, cols=1)
 setRowHeights(wb, "Mechanism of Injury", rows=fn_m, heights=110)
 
 # ── Save Excel ────────────────────────────────────────────────────────────────
-xlsx_path <- file.path(xlsx_dir, "NASS Laceration Phase 2 Output 1.8.xlsx")
+xlsx_path <- file.path(xlsx_dir, "NASS Laceration Phase 2 Output 1.9.xlsx")
 saveWorkbook(wb, file=xlsx_path, overwrite=TRUE)
 message("Excel saved: ", xlsx_path)
 ```
@@ -2674,17 +2726,28 @@ message("\nAll Word tables saved to: ", word_dir)
 
 library(readr)
 
-nis_core_asc <- paste0(
-  "/Users/solomon/Library/CloudStorage/OneDrive-UW/Research projects/",
-  "NASS traumatic facial nerve repair project/Data/",
-  "HCUP Original Data Files 21 through 23/HCUP NIS/NIS_2023/",
-  "NIS_2023_Core.ASC"
+# v1.9: prefer local Desktop alias; fall back to OneDrive if not present
+nis_subpath <- file.path(
+  "HCUP Original Data Files 21 through 23",
+  "HCUP NIS", "NIS_2023", "NIS_2023_Core.ASC"
 )
+nis_local    <- file.path(local_data_root,    nis_subpath)
+nis_onedrive <- file.path(onedrive_data_root, nis_subpath)
 
-nis_available <- file.exists(nis_core_asc)
+nis_core_asc <- if (file.exists(nis_local)) {
+  message("NIS 2023 ASC located locally: ", nis_local)
+  nis_local
+} else if (file.exists(nis_onedrive)) {
+  message("NIS 2023 ASC located in OneDrive (fallback): ", nis_onedrive)
+  nis_onedrive
+} else {
+  ""
+}
+
+nis_available <- nzchar(nis_core_asc) && file.exists(nis_core_asc)
 if (!nis_available) {
-  message("NIS 2023 ASC file not found at: ", nis_core_asc)
-  message("Skipping NIS parallel cohort analysis. Provide the file or update the path.")
+  message("NIS 2023 ASC file not found at either location.")
+  message("Skipping NIS parallel cohort analysis. Update paths if needed.")
   nis_parallel_results <- tibble(
     Metric = c("Status"),
     Value  = c("NIS 2023 file unavailable \u2014 chunk skipped")
@@ -2910,8 +2973,8 @@ cat(draft_methods)
 ```{r copy-to-drive}
 #| cache: false
 # Copy the rendered HTML and the .qmd source into the Quarto Versions subfolder.
-qmd_basename  <- "nass_phase2_analysis_1_8.qmd"
-html_basename <- "nass_phase2_analysis_1_8.html"
+qmd_basename  <- "nass_phase2_analysis_1_9.qmd"
+html_basename <- "nass_phase2_analysis_1_9.html"
 
 # HTML: search common locations for the rendered output
 html_candidates <- c(
