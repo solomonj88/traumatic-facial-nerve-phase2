@@ -2804,26 +2804,73 @@ if (!nis_available) {
 
   # ── Auto-discover positions for disposition/LOS analysis ─────────────────
   # Attempts to find and parse the StataLoad .Do file, which specifies the
-  # exact byte positions of every variable in the ASC file. If found,
-  # AGE / DIED / DISPUNIFORM / LOS / TOTCHG positions are added to col_spec
-  # and the disposition/LOS chunks downstream can run. If not found, those
-  # chunks display a "pending" message with instructions.
-  parse_stataload_positions <- function(do_file) {
+  # exact byte positions of every variable in the ASC file. Tries multiple
+  # common HCUP formats; if none match, prints first 25 lines of the file
+  # so the format can be inspected and the parser updated.
+  parse_stataload_positions <- function(do_file, verbose=TRUE) {
     lines <- readLines(do_file, warn=FALSE)
     positions <- list()
+
+    # Format 1: _column(N) TYPE NAME %Wf
+    #   Example:  _column(20)   byte    AGE     %2f
     for (l in lines) {
-      # HCUP StataLoad format: _column(START) TYPE NAME %WIDTHf
-      # Example:  _column(20)   byte    AGE     %2f
       m <- regmatches(l, regexec(
-        "_column\\((\\d+)\\)\\s+\\S+\\s+([A-Z][A-Z0-9_]*)\\s+%(\\d+)",
-        l))[[1]]
+        "_column\\((\\d+)\\)\\s+\\S+\\s+([A-Z][A-Z0-9_]*)\\s+%(\\d+)", l))[[1]]
       if (length(m) == 4) {
-        start <- as.integer(m[2])
-        width <- as.integer(m[4])
-        positions[[m[3]]] <- c(start = start, end = start + width - 1L)
+        positions[[m[3]]] <- c(start = as.integer(m[2]),
+                                end   = as.integer(m[2]) + as.integer(m[4]) - 1L)
       }
     }
-    positions
+    if (length(positions) > 0) {
+      if (verbose) message("StataLoad parsed via _column() format: ",
+                           length(positions), " variables")
+      return(positions)
+    }
+
+    # Format 2: TYPE NAME START- END  (Stata infix with dash-separated positions)
+    #   Example:  infix str4 HOSP_NIS  1-     4  ///
+    #             long  AGE          5-     6  ///
+    for (l in lines) {
+      m <- regmatches(l, regexec(
+        "(?:str\\w*|long|byte|int|float|double)\\s+([A-Z][A-Z0-9_]*)\\s+(\\d+)\\s*-\\s*(\\d+)",
+        l, perl=TRUE))[[1]]
+      if (length(m) == 4) {
+        positions[[m[2]]] <- c(start = as.integer(m[3]),
+                                end   = as.integer(m[4]))
+      }
+    }
+    if (length(positions) > 0) {
+      if (verbose) message("StataLoad parsed via infix dash format: ",
+                           length(positions), " variables")
+      return(positions)
+    }
+
+    # Format 3: permissive — just NAME followed by START-END anywhere on line
+    for (l in lines) {
+      m <- regmatches(l, regexec(
+        "\\b([A-Z][A-Z0-9_]{2,})\\s+(\\d+)\\s*-\\s*(\\d+)\\b", l))[[1]]
+      if (length(m) == 4) {
+        positions[[m[2]]] <- c(start = as.integer(m[3]),
+                                end   = as.integer(m[4]))
+      }
+    }
+    if (length(positions) > 0) {
+      if (verbose) message("StataLoad parsed via permissive format: ",
+                           length(positions), " variables")
+      return(positions)
+    }
+
+    # All parsers failed — show diagnostic output
+    if (verbose) {
+      message("==========================================================")
+      message("StataLoad parser FAILED. First 25 non-blank lines of file:")
+      message("==========================================================")
+      nonblank <- lines[nzchar(trimws(lines))]
+      for (l in head(nonblank, 25)) message("  ", l)
+      message("==========================================================")
+      message("Update parse_stataload_positions() to handle this format.")
+    }
+    positions  # empty list
   }
 
   stataload_candidates <- c(
