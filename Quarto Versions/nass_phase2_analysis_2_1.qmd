@@ -3599,9 +3599,9 @@ if (!has_los) {
     `Median LOS (days)` = NA_real_,
     `IQR` = NA_character_,
     `Mean LOS (days)`   = NA_real_,
-    `LOS \u22641 day (%)`  = NA_real_,
-    `LOS 2-7 days (%)`  = NA_real_,
-    `LOS \u22658 days (%)`  = NA_real_
+    `LOS 1 day or less (%)` = NA_real_,
+    `LOS 2-7 days (%)`      = NA_real_,
+    `LOS 8+ days (%)`       = NA_real_
   )
   message("NIS LOS analysis pending: LOS column not in nis_g1_data.")
   message("Place StataLoad_NIS_2023_Core.Do in HCUP NIS/ folder to enable.")
@@ -3623,24 +3623,24 @@ if (!has_los) {
       Q1           = quantile(los_n, 0.25, na.rm=TRUE),
       Q3           = quantile(los_n, 0.75, na.rm=TRUE),
       `Mean LOS (days)`   = round(mean(los_n, na.rm=TRUE), 1),
-      `LOS \u22641 day (N)`  = sum(los_n <= 1, na.rm=TRUE),
-      `LOS 2-7 days (N)`  = sum(los_n >= 2 & los_n <= 7, na.rm=TRUE),
-      `LOS \u22658 days (N)`  = sum(los_n >= 8, na.rm=TRUE),
+      `LOS 1 day or less (N)` = sum(los_n <= 1, na.rm=TRUE),
+      `LOS 2-7 days (N)`      = sum(los_n >= 2 & los_n <= 7, na.rm=TRUE),
+      `LOS 8+ days (N)`       = sum(los_n >= 8, na.rm=TRUE),
       .groups = "drop"
     ) %>%
     mutate(
       `IQR` = paste0(Q1, "-", Q3),
-      `LOS \u22641 day (%)`  = ifelse(N > 0, round(100 * `LOS \u22641 day (N)`  / N, 1), NA_real_),
-      `LOS 2-7 days (%)`     = ifelse(N > 0, round(100 * `LOS 2-7 days (N)`     / N, 1), NA_real_),
-      `LOS \u22658 days (%)`  = ifelse(N > 0, round(100 * `LOS \u22658 days (N)`  / N, 1), NA_real_)
+      `LOS 1 day or less (%)` = ifelse(N > 0, round(100 * `LOS 1 day or less (N)` / N, 1), NA_real_),
+      `LOS 2-7 days (%)`      = ifelse(N > 0, round(100 * `LOS 2-7 days (N)`      / N, 1), NA_real_),
+      `LOS 8+ days (%)`       = ifelse(N > 0, round(100 * `LOS 8+ days (N)`       / N, 1), NA_real_)
     ) %>%
     select(-Q1, -Q3,
-           -`LOS \u22641 day (N)`, -`LOS 2-7 days (N)`, -`LOS \u22658 days (N)`)
+           -`LOS 1 day or less (N)`, -`LOS 2-7 days (N)`, -`LOS 8+ days (N)`)
 
   nis_los_display <- nis_los_summary %>%
     mutate(across(c(`Median LOS (days)`, `Mean LOS (days)`,
-                     `LOS \u22641 day (%)`, `LOS 2-7 days (%)`,
-                     `LOS \u22658 days (%)`),
+                     `LOS 1 day or less (%)`, `LOS 2-7 days (%)`,
+                     `LOS 8+ days (%)`),
                   ~ ifelse(N < 11, NA, .))) %>%
     rename(Group = group)
 }
